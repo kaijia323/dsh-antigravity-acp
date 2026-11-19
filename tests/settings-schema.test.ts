@@ -12,6 +12,8 @@ describe('live settings schema and runtime references', () => {
     expect(config.cancelGraceMs).toBe(0)
     expect(config.idleRecycleMs).toBe(0)
     expect(config.handshakeTimeoutMs).toBe(120000)
+    expect(config.sessionTimeoutMs).toBe(120000)
+    expect(config.promptTimeoutMs).toBe(1_800_000)
     expect(config.extraArgs).toEqual([])
     expect(config.modelOverrides).toEqual({})
   })

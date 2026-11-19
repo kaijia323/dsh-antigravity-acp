@@ -42,6 +42,12 @@ export interface AntigravityHostConfig {
   authTimeoutMs?: number
   /** 单轮 session/prompt 的等待上限（毫秒）；ACP 回合可能很长，默认 30 分钟。 */
   promptTimeoutMs?: number
+  /**
+   * session/new 与 session/resume 的请求上限（毫秒），默认 120 秒。
+   * 与通用 requestTimeoutMs 分开：官方 agent 冷启动、同账号多 worker 并发时，
+   * 30 秒内完成会话创建并不罕见（真机 2026-11-19 子代理 session/new 超时）。
+   */
+  sessionTimeoutMs?: number
   /** 并发 MCP tools/call 的聚合窗口（毫秒），决定同一轮携带多少 tool-call block。 */
   bridgeParkSettleMs?: number
   /**
@@ -141,6 +147,7 @@ export const Config = Schema.object({
   handshakeTimeoutMs: Schema.natural().min(1000).default(120_000).description('initialize 握手等待上限（毫秒）；官方进程冷启动（解压、杀软扫描）可能超过 1 分钟'),
   authTimeoutMs: Schema.natural().default(300_000).description('authenticate（需人工在浏览器完成 OAuth 授权）的等待上限（毫秒）'),
   promptTimeoutMs: Schema.natural().default(1_800_000).description('单轮 session/prompt 的等待上限（毫秒）'),
+  sessionTimeoutMs: Schema.natural().min(1000).default(120_000).description('session/new 与 session/resume 的请求上限（毫秒）；默认 120 秒，官方 agent 冷启动 / 多 worker 并发时 30 秒默认值不够'),
   bridgeParkSettleMs: Schema.natural().default(50).description('并发 MCP tools/call 的聚合窗口（毫秒）'),
   modelOverrides: Schema.dict(ModelOverrideSchema).default({}).volatile().description('按模型 ID 的目录设置（是否显示、显示名、官方模型 ID 映射）；只作用于目录中已存在的模型') as Schema<
     Record<string, ModelOverride>,

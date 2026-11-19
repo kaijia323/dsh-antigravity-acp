@@ -7,6 +7,8 @@
 
 > 基于 [KouzakiUmi/dsh-antigravity-acp](https://github.com/KouzakiUmi/dsh-antigravity-acp)（MIT）的独立分支，
 > 2026-11-17 起由 `AlaIchhe` 维护。上游原文见 [README.upstream.md](./README.upstream.md)；
+>
+> **本 fork（kaijia323/dsh-antigravity-acp）**：2026-11-19 起在 AlaIchhe fork 基础上自行维护，修复 DSH `busyEnter: steer` 插话导致会话不可恢复、续轮通知未投递、子代理 `session/new` 30 秒超时等问题（详见 [docs/changelog.md](./docs/changelog.md)）。安装用本仓库构建的 tarball（`npm run build && npm pack`）或钉 commit 的 git spec；
 > 原作者如认为本分支不妥，提 [issue](https://github.com/AlaIchhe/dsh-antigravity-acp/issues) 即可，我会归档该仓库。
 
 ## 功能

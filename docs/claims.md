@@ -41,6 +41,9 @@
 | 24 | 同账号 5 路并发（含长回答）不触发 429 | 无（实验结论） | ✅ | 2026-11-18 两轮探针：5/5 成功、零 429 |
 | 25 | `PromptResponse.usage` 是**本回合**内各次内部模型调用之和（非会话累计）；`totalTokens` = 本轮 Σ `usage_update.used` | `adapter/prompt-turn.ts` | ✅ | 2026-11-18 探针（4 轮）：单调用轮 total=used=8700/8779；3 次调用轮 total=27150=8925+9060+9165，而回合末上下文只有 9165；第 4 轮 total=9244 < 上一轮 27150（若为累计不可能） |
 | 26 | agy 对 MCP 工具声明 `mcp_dsh-tools_<后缀>_<短名>`，并在声明里附加必填 `toolSummary`；调用进 MCP 前这两项被剥离 | `adapter/tool-args.ts` | ✅ | 2026-11-18：agy 会话库里的工具声明含 `{"required":["toolSummary"],…}` 与 `mcp_dsh-tools_5406866c_*`；DSH `session-6642c5ed` 的 584 次 `tool/call` 参数里没有 `toolSummary` |
+| 27 | DSH `busyEnter: steer` 会把用户插话作为**真实 user 消息**追加在工具结果之后（不是宿主上下文） | `adapter/continuation-state.ts` | ✅ | 真机 2026-11-19 15:23 会话 `a25898d0`：seq 33 user/message（`source.kind=user`）紧跟工具结果；旧版同一形态会话 `d7bdbc39` 在此报 `AGY_SESSION_UNRECOVERABLE` |
+| 28 | 官方 ACP `session/new` 在冷启动 / 多 worker 并发时可能超过 30 秒 | `adapter/antigravity-adapter.ts`（`sessionTimeoutMs`） | ✅ | 真机 2026-11-19 15:07 子代理报 `ACP 请求超时（30000ms）: session/new`；同机 15:23 以 120 秒上限成功建立 Gemini 子代理并返回 `OK` |
+| 29 | 工具续轮中把文本附到最后一条工具结果，agent 会在同一 prompt 内看到并回应 | `adapter/antigravity-adapter.ts`（`tailDeliveryNote`） | ✅ | 真机 2026-11-19 15:23：steer「额外告诉我 6*7」→ 助手回复 `6 × 7 = 42`（该内容只出现在 steer 中） |
 
 ## 优先验证顺序（按“错了会怎样”排序）
 

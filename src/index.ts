@@ -670,6 +670,7 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
         active.bridgeTeardown = teardown
       },
       promptTimeoutMs: config.promptTimeoutMs,
+      sessionTimeoutMs: config.sessionTimeoutMs,
       parkSettleMs: config.bridgeParkSettleMs,
       modelOverrides: config.modelOverrides,
       readSettings: () => ({ ...config, sessionStore: config.resumeSessions ? sessionStore : undefined }),

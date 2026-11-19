@@ -4,6 +4,14 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.1 · 2026-11-19（kaijia323 fork）
+
+- **修复：DSH 用户插话（`busyEnter: steer`）会杀死会话**。DSH 在回合中途把用户插话作为真实 user 消息追加在工具结果之后；旧实现把它当成「历史被改写」，`#abandonTurn()` 丢会话后因中途没有磁盘映射直接报 `AGY_SESSION_UNRECOVERABLE`（真机 2026-11-19 15:11 复现：会话 `d7bdbc39` 第 18 步作废）。现在 `ContinuationState` 把「user 角色 + id 从未发出」的尾部消息（宿主通知与用户插话）排除在续轮判定之外，并把可投递内容附到最后一条工具结果交给 agent——插话不再丢失，也不会再判死会话。
+- **修复：续轮期间的一次性通知被静默吞掉**。子代理完成 / 后台任务完成这类 `tool-jobs`、`subagent-settled` 通知此前在续轮里只被跳过、从未送达模型（`#advanceSession` 又把它们计入已发送），表现为「主代理读不到子代理结果」。现在按 form 跳过可重复的大块上下文（snapshot / catalog / instructions / recall），其余一次性通知与插话统一随工具结果投递（`tailDeliveryNote`）。
+- **新增 `sessionTimeoutMs`（默认 120000）**：只作用于 `session/new` 与 `session/resume`。此前二者共用 `requestTimeoutMs=30000`，官方进程冷启动 / 多 worker 并发时子代理会报 `ACP 请求超时（30000ms）: session/new`（真机 2026-11-19 15:07 复现，子代理 `audit-backend`）；现在默认 120 秒，可用普通配置覆盖。
+- 真机 E2E（2026-11-19 15:23–15:25，DSH 0.2.2-rc.5 + Gemini 4 Neon）：① 工具执行中插入 steer，回合正常 completed，助手回复 `6 × 7 = 42`；② 默认路由 Gemini 子代理成功启动并返回 `OK`，无 `session/new` 超时。
+- 已知残余：会话取消 / worker 回收 / 上游挂起后的「无映射」路径仍按设计报 `AGY_SESSION_UNRECOVERABLE`（本 fork 暂未加入历史重放兜底）。
+
 ## 0.3.1 · 2026-11-19
 
 - **删除选择器识别的名字猜测**：`findModelSelector` / `findThoughtLevelSelector` 此前在缺少 `category` 时回退到 `/model/i`、`/thought|effort|reason/i` 的名字匹配。真机确认（`agy acp` 1.5.10）：`session/new` 返回的三个 select（`model` / `thought_level` / `mode`）**全部带 `category`**，不需要猜。现在只认语义标签，缺标签返回 `undefined`，由调用方走「无可选模型 / 无独立档位通道」的显式失败。理由：名字匹配会把别的 select 误认成模型选择器，而错误路由不可逆。

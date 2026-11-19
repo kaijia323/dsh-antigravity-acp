@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createAssistantMessage, createSystemMessage, createToolResultMessage, createUserMessage, ReasoningEffortId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, RequestMessage, ToolCallBlock } from '@deepseek-ai/dsh-llm'
-import { ContinuationState } from '../src/adapter/continuation-state.js'
+import { ContinuationState, tailDeliveryNote } from '../src/adapter/continuation-state.js'
 
 const call: ToolCallBlock = { type: 'tool-call', id: ToolCallId('call-1'), name: 'read', arguments: '{"path":"a"}' }
 function initial(): GenerateOptions {
@@ -82,14 +82,15 @@ describe('注入块不参与续轮前缀比较', () => {
     expect(state.accepts(next, 1)).toBe(true)
   })
 
-  it('真实用户消息仍然破坏前缀（注入豁免不能变成任意篡改）', () => {
+  it('真实用户消息插在历史中间仍然破坏前缀（注入豁免不能变成任意篡改）', () => {
     const base = initial()
     const state = new ContinuationState(base)
     state.emitted(call)
     const next = continuation(base)
     next.messages = [
-      ...next.messages,
+      next.messages[0]!,
       createUserMessage({ content: [{ type: 'text', text: '插入的用户消息' }], source: { kind: 'user' } }),
+      ...next.messages.slice(1),
     ]
     expect(state.accepts(next, 1)).toBe(false)
   })
@@ -187,16 +188,15 @@ describe('宿主上下文按 id 识别，不再按来源类型', () => {
     expect(state.accepts(next, 1)).toBe(true)
   })
 
-  it('真实用户消息仍然破坏增量判定（豁免不会扩散成任意篡改）', () => {
+  it('工具结果之后的真实用户插话（steer）不再破坏续轮，并能被单独取出投递', () => {
     const base = initial()
     const state = new ContinuationState(base)
     state.emitted(call)
     const next = continuation(base)
-    next.messages = [
-      ...next.messages,
-      createUserMessage({ content: [{ type: 'text', text: '插入的用户消息' }], source: { kind: 'user' } }),
-    ]
-    expect(state.accepts(next, 1)).toBe(false)
+    const steer = createUserMessage({ content: [{ type: 'text', text: '用户插话' }], source: { kind: 'user' } })
+    next.messages = [...next.messages, steer]
+    expect(state.accepts(next, 1)).toBe(true)
+    expect(state.trailingUnsentUserMessages(next.messages)).toEqual([steer])
   })
 
   it('已发送的历史被改写（同 id 不同内容）必须拒绝', () => {
@@ -210,5 +210,42 @@ describe('宿主上下文按 id 识别，不再按来源类型', () => {
       ...next.messages.slice(1),
     ]
     expect(state.accepts(next, 1)).toBe(false)
+  })
+})
+
+describe('尾部未发送消息的投递（宿主通知 / 用户插话）', () => {
+  /** 造一条指定 kind/form 的 user 消息（宿主在请求生成时追加）。 */
+  function hostContext(text: string, kind: string, form: string): RequestMessage {
+    return createUserMessage({
+      content: [{ type: 'text', text }],
+      source: { kind, form },
+    } as never) as RequestMessage
+  }
+
+  it('多条尾部消息按原顺序取出；assistant/tool 不混入', () => {
+    const base = initial()
+    const state = new ContinuationState(base)
+    const next = continuation(base)
+    const notice = hostContext('后台任务完成', 'tool-jobs', 'notice')
+    const steer = createUserMessage({ content: [{ type: 'text', text: '先看这个' }], source: { kind: 'user' } })
+    const all = [...next.messages, notice, steer]
+    expect(state.trimTrailingUnsentUser(all)).toEqual(next.messages)
+    expect(state.trailingUnsentUserMessages(all)).toEqual([notice, steer])
+  })
+
+  it('tailDeliveryNote 投递一次性通知与用户插话，跳过可重复的大块上下文', () => {
+    const notice = hostContext('Background subagent x finished: OK', 'subagent-settled', 'notice')
+    const steer = createUserMessage({ content: [{ type: 'text', text: '先做 UI' }], source: { kind: 'user' } })
+    const snapshot = hostContext('Time sampled ...', 'time-context', 'snapshot')
+    const note = tailDeliveryNote([snapshot, notice, steer])
+    expect(note).toBeDefined()
+    expect(note).toContain('Background subagent x finished: OK')
+    expect(note).toContain('先做 UI')
+    expect(note).not.toContain('Time sampled')
+  })
+
+  it('没有可投递内容时返回 undefined', () => {
+    const snapshot = hostContext('Time sampled ...', 'time-context', 'snapshot')
+    expect(tailDeliveryNote([snapshot])).toBeUndefined()
   })
 })

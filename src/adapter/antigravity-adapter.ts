@@ -44,7 +44,7 @@ import { buildPromptDeltaWithImages, buildPromptWithImages, buildToolResultConte
 import type { ImageReader } from './image-content.js'
 import { AGY_TURN_ERROR, PromptTurn } from './prompt-turn.js'
 import type { AcpLifecycle } from '../runtime/lifecycle.js'
-import { ContinuationState } from './continuation-state.js'
+import { ContinuationState, tailDeliveryNote } from './continuation-state.js'
 import { incrementalMessages, outputHash, outputMatches, prefixHash, prefixMatches, reusableSessionKey, routeFingerprint } from './session-reuse.js'
 import { SessionMapStore } from '../runtime/session-map.js'
 import type { SessionMapEntry } from '../runtime/session-map.js'
@@ -92,6 +92,14 @@ export interface AntigravityAcpAdapterOptions {
   registerBridgeTeardown: (teardown: () => Promise<void>) => void
   /** session/prompt 等待上限（毫秒）。 */
   promptTimeoutMs?: number
+  /**
+   * session/new 与 session/resume 的请求上限（毫秒）。
+   *
+   * 与通用 requestTimeoutMs（默认 30 秒）分开：官方 agent 进程冷启动、同账号
+   * 多 worker 并发时，30 秒内完成会话创建并不罕见（真机 2026-11-19 子代理
+   * `session/new` 超时）。默认 120 秒。
+   */
+  sessionTimeoutMs?: number
   /** 并发 MCP park 的聚合窗口（毫秒）。 */
   parkSettleMs?: number
   /** session/new 使用的工作目录；缺省为进程 cwd。 */
@@ -212,6 +220,7 @@ interface ReusedSession {
  */
 
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60_000
+const DEFAULT_SESSION_TIMEOUT_MS = 120_000
 const DEFAULT_PARK_SETTLE_MS = 50
 
 export class AntigravityAcpAdapter extends LlmAdapter {
@@ -226,6 +235,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   #unrecycledLink: AgentLink | undefined
   readonly #registerBridgeTeardown: AntigravityAcpAdapterOptions['registerBridgeTeardown']
   readonly #promptTimeoutMs: number
+  readonly #sessionTimeoutMs: number
   readonly #parkSettleMs: number
   readonly #cwd: string
   /** 配置的会话模式；空串表示沿用 agent 默认。 */
@@ -340,6 +350,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     this.#recycleLink = options.recycleLink
     this.#registerBridgeTeardown = options.registerBridgeTeardown
     this.#promptTimeoutMs = options.promptTimeoutMs ?? DEFAULT_PROMPT_TIMEOUT_MS
+    this.#sessionTimeoutMs = Math.max(1_000, options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS)
     this.#parkSettleMs = options.parkSettleMs ?? DEFAULT_PARK_SETTLE_MS
     this.#cwd = options.cwd ?? process.cwd()
     this.#agentMode = options.agentMode?.trim() ?? ''
@@ -891,7 +902,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     if (!link.supportsResumeSession()) return fail('agent 未声明 session/resume')
     this.#suppressUpdates += 1
     try {
-      const timeoutMs = Math.min(this.#promptTimeoutMs, 120_000)
+      const timeoutMs = Math.min(this.#promptTimeoutMs, this.#sessionTimeoutMs)
       const request = {
         sessionId: entry.sessionId,
         cwd: this.#cwd,
@@ -1243,16 +1254,26 @@ export class AntigravityAcpAdapter extends LlmAdapter {
 
   /** 同一时刻只有一个 stream 能创建/切换会话或消费回合队列。 */
   async *#streamExclusive(options: GenerateOptions): AsyncGenerator<StreamChunk> {
-    const tail = trailingToolResults(options.messages, this.#continuationState)
+    const state = this.#continuationState
+    const tail = trailingToolResults(options.messages, state)
     let turn = this.#turn
     if (turn?.awaitingToolResults) {
       // 能续轮的前提有两个：ACP prompt 尚未应答（同一 prompt 内才能继续
       // 产出），且尾部 tool 结果与 park 表按调用 id 一一匹配。
-      if (!turn.promptSettled && matchesParkedCalls(turn, tail, this.#bridge) && this.#continuationState?.accepts(options, tail.length)) {
+      if (!turn.promptSettled && matchesParkedCalls(turn, tail, this.#bridge) && state?.accepts(options, tail.length)) {
+        // 尾部尚未发出的 user 消息（宿主通知 / 用户插话）在续轮里没有第二条
+        // prompt 可发：附到最后一条工具结果里，agent 才能看到「后台任务完成」
+        // 「子代理完成」「用户插话」这类一次性内容；漏投递会让主代理永远读不到
+        // 子代理结果，判定失败则会丢会话并让整轮不可恢复。
+        const unsent = state.trailingUnsentUserMessages(options.messages)
+        const note = tailDeliveryNote(unsent)
         // 续轮接受后重置账本：本批 assistant 块必须记在**新**状态上，否则下一批
         // 工具调用的 accepts() 会把这两批块累加比较而永远失败。
         this.#continuationState = new ContinuationState(options)
-        yield* this.#runContinuation(turn, options, tail)
+        if (note !== undefined) {
+          this.#log?.info(`antigravity-acp: 续轮投递尾部未发送消息 ${unsent.length} 条（宿主通知/用户插话）`)
+        }
+        yield* this.#runContinuation(turn, options, tail, note)
         return
       }
       // 不匹配（或 agent 已经收尾）→ 放弃旧回合，按新轮重新校验。历史接不上
@@ -1344,7 +1365,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           // 继续编成 `<dsh-system>` 文本块（见 stream 的 prompt 组装）。
           ...(systemViaMeta ? { systemPrompt: { append: options.system } } : {}),
         } },
-      }, { signal: options.signal })
+      }, { signal: options.signal, timeoutMs: this.#sessionTimeoutMs })
       check()
       if (systemViaMeta) this.#systemViaMeta.add(session.sessionId)
       this.observeSessionConfigOptions(session.configOptions)
@@ -1589,7 +1610,12 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
   }
 
-  async *#runContinuation(turn: PromptTurn, options: GenerateOptions, tail: readonly RequestMessage[]): AsyncGenerator<StreamChunk> {
+  async *#runContinuation(
+    turn: PromptTurn,
+    options: GenerateOptions,
+    tail: readonly RequestMessage[],
+    note?: string,
+  ): AsyncGenerator<StreamChunk> {
     this.#bridge.publishTools(options.tools ?? [])
     if (turn.terminated) {
       // 终止的回合不会再有生产者。必须**先于 resume()** 判定：resume 会把
@@ -1614,6 +1640,12 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         isError: message.isError === true,
       }
     }))
+    if (note !== undefined && results.length > 0) {
+      // 续轮不重发 prompt，也没有第二个 ACP prompt 承载「宿主通知 / 用户
+      // 插话」；附到最后一条工具结果里交给 agent（内容一次性、只发一次）。
+      const last = results[results.length - 1]!
+      last.content = [...(last.content ?? []), { type: 'text', text: note }]
+    }
     try {
       // 续轮不重发 prompt：结果交给桥 resolve 上轮 park 的 MCP 调用，agent 在
       // **同一个 ACP prompt** 内继续产出后续 session/update。
@@ -2062,23 +2094,26 @@ function unsupportedOptions(options: GenerateOptions): string[] {
 /**
  * 取 messages 尾部连续的 tool 结果消息（按原顺序）。
  *
- * 会先跳过落在工具结果**之后**的宿主上下文（`time-context` 按 600s 墙钟到期、
- * `runtime-context` 随宿主服务变化、`tool-jobs` 后台任务通知…）。DSH 的 pre-step
- * 把它们追加到请求 `messages` 的最后一条；它们不是「上一步的模型输出」，不能
- * 因为它们排在末尾就判定「尾部没有工具结果」——那会让续轮假失败、进而丢弃
- * ACP 会话（真机实测：整轮 `AGY_SESSION_UNRECOVERABLE`）。
+ * 会先跳过落在工具结果**之后**的未发送 user 消息：
+ * - 宿主追加上下文（`time-context` 墙钟到期、`runtime-context`、技能目录、
+ *   `tool-jobs` 后台任务通知……）；
+ * - 用户在回合中途的插话（DSH `busyEnter: steer`）。
  *
- * 判定用 `ContinuationState.isHostContext()`：`user` 角色且 id 从未发出去过。
- * 不枚举来源类型，新增来源自动生效。
+ * DSH 的 pre-step 把它们追加到请求 `messages` 的最后一条；它们不是「上一步的
+ * 模型输出」，不能因为它们排在末尾就判定「尾部没有工具结果」——那会让续轮
+ * 假失败、进而丢弃 ACP 会话（真机实测：整轮 `AGY_SESSION_UNRECOVERABLE`）。
  *
- * 注意：跳过的消息仍然留在 `options.messages` 里，各自被正常发给 agent；
- * 这里只是改变「向下找工具结果」的起点。
+ * 判定用 `ContinuationState.trimTrailingUnsentUser()`：`user` 角色且 id 从未
+ * 发出去过。不枚举来源类型，新增来源自动生效。
+ *
+ * 注意：跳过的消息仍然留在 `options.messages` 里；续轮时由
+ * `tailDeliveryNote()` 附到最后一条工具结果投递给 agent。
  */
 function trailingToolResults(
   messages: readonly RequestMessage[],
   state?: ContinuationState,
 ): RequestMessage[] {
-  const end = state === undefined ? messages.length - 1 : state.trimTrailingHostContext(messages).length - 1
+  const end = state === undefined ? messages.length - 1 : state.trimTrailingUnsentUser(messages).length - 1
   const tail: RequestMessage[] = []
   for (let index = end; index >= 0; index -= 1) {
     const message = messages[index]
@@ -2087,6 +2122,7 @@ function trailingToolResults(
   }
   return tail
 }
+
 
 /**
  * 续轮匹配：尾部 tool 结果与**仍在等待回喂**的 park 调用按 id 一一对应。
