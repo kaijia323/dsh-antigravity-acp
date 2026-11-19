@@ -88,6 +88,15 @@ export interface AntigravityHostConfig {
   /** 重放兜底的历史预算（字符数，默认 120000）。 */
   replayMaxChars?: number
   /**
+   * 目录没有报告上下文容量时的兜底值（tokens，默认 1048576；0 表示不填）。
+   *
+   * 官方 ACP 目录只报告模型 id/名称，容量要等会话 `usage_update` 才能观测到；
+   * 未观测过的模型（如 gemini-4-hydrogen）若不带容量，DSH 在「切换模型」时
+   * 会因无法计算压缩目标而报 `MODEL_SWITCH_COMPACTION_FAILED`。这里给一个
+   * 可配置的保守默认：Claude 家族封顶 200k，其余用该值。
+   */
+  defaultContextWindow?: number
+  /**
    * 是否允许额度取数调用本机官方 agy CLI（默认关闭）。
    * 关闭时不 spawn agy：套餐额度走 Cloud Code Assist HTTP（读该账号 HOME 下
    * 的 CLI 登录态），AI Credits 不查询。
@@ -99,7 +108,7 @@ export interface AntigravityHostConfig {
 
 // Only fields owned by the custom settings card are live. Ordinary launch/pool
 // configuration remains ordinary, so editing it still follows the host lifecycle.
-export const LIVE_SETTING_KEYS = ['agentMode', 'modelOverrides', 'proxyUrl', 'proxyBypass', 'agyCliPath', 'resumeSessions', 'replayFallback', 'replayMaxChars', 'cancelGraceMs', 'idleRecycleMs', 'cliQuotaEnabled'] as const
+export const LIVE_SETTING_KEYS = ['agentMode', 'modelOverrides', 'proxyUrl', 'proxyBypass', 'agyCliPath', 'resumeSessions', 'replayFallback', 'replayMaxChars', 'defaultContextWindow', 'cancelGraceMs', 'idleRecycleMs', 'cliQuotaEnabled'] as const
 export type LiveSettingKey = typeof LIVE_SETTING_KEYS[number]
 export type AntigravityPluginConfig = Omit<AntigravityHostConfig, LiveSettingKey> & {
   [K in LiveSettingKey]?: AntigravityHostConfig[K] | Volatile<AntigravityHostConfig[K]>
@@ -125,6 +134,7 @@ export function liveHostConfig(config: AntigravityPluginConfig): AntigravityHost
     get resumeSessions() { return readSetting(config.resumeSessions) },
     get replayFallback() { return readSetting(config.replayFallback) },
     get replayMaxChars() { return readSetting(config.replayMaxChars) },
+    get defaultContextWindow() { return readSetting(config.defaultContextWindow) },
     get cancelGraceMs() { return readSetting(config.cancelGraceMs) },
     get idleRecycleMs() { return readSetting(config.idleRecycleMs) },
     get cliQuotaEnabled() { return readSetting(config.cliQuotaEnabled) },
@@ -168,6 +178,7 @@ export const Config = Schema.object({
   resumeSessions: Schema.boolean().default(true).volatile().description('重启后用 session/resume 接上原 ACP 会话（唯一延续路径）；关掉它等于禁止历史会话跨进程继续。接不上时按 replayFallback 决定重放兜底或报错'),
   replayFallback: Schema.boolean().default(true).volatile().description('会话无法接上时用最近历史重放新建 ACP 会话，避免对话永久失效；关闭则直接报 AGY_SESSION_UNRECOVERABLE'),
   replayMaxChars: Schema.natural().min(1_000).max(2_000_000).default(120_000).volatile().description('重放兜底的历史预算（字符数）'),
+  defaultContextWindow: Schema.natural().min(0).max(10_000_000).default(1_048_576).volatile().description('目录未报告容量时的兜底上下文窗口（tokens，0=不填）；Claude 家族封顶 200k。用于避免切换模型时 MODEL_SWITCH_COMPACTION_FAILED'),
   cancelGraceMs: Schema.natural().max(60_000).default(30_000).volatile().description('取消后等待 agent 确认停止的上限（毫秒）；0 表示不等待、立即回收'),
   idleRecycleMs: Schema.natural().max(3_600_000).default(900_000).volatile().description('空闲 worker 保留多久（毫秒）；默认 15 分钟后回收进程，下次进入该对话用 session/resume 接回（已验证不重放历史）。0 表示不回收'),
   cliQuotaEnabled: Schema.boolean().default(false).volatile().description('允许额度取数调用本机 agy CLI（默认关闭）。关闭时不启动 agy，套餐额度走内置直连，AI Credits 不查询。开启后运行 agy -p /usage 与 agy -p /credits；未找到 CLI 时套餐额度回落直连'),

@@ -156,10 +156,15 @@ export interface AntigravityAcpAdapterOptions {
   replayFallback?: boolean
   /** 重放兜底的历史预算（字符数，默认 120000）。 */
   replayMaxChars?: number
+  /**
+   * 目录未报告上下文容量时的兜底窗口（tokens，默认 1048576；0 表示不填）。
+   * 没有它，DSH 在切换到未观测容量的模型时会报 MODEL_SWITCH_COMPACTION_FAILED。
+   */
+  defaultContextWindow?: number
   /** 所有 worker 共享的映射存储（含键所有权与串行提交）。 */
   sessionStore?: SessionMapStore
   /** Capture live preferences only between ACP turns, never during tool continuation. */
-  readSettings?: () => Pick<AntigravityAcpAdapterOptions, 'modelOverrides' | 'resumeSessions' | 'cancelGraceMs' | 'idleRecycleMs' | 'sessionStore' | 'replayFallback' | 'replayMaxChars'>
+  readSettings?: () => Pick<AntigravityAcpAdapterOptions, 'modelOverrides' | 'resumeSessions' | 'cancelGraceMs' | 'idleRecycleMs' | 'sessionStore' | 'replayFallback' | 'replayMaxChars' | 'defaultContextWindow'>
   /** 独立 adapter 的兼容读取回调；连接池必须改用共享 sessionStore。 */
   loadSessionMap?: () => Promise<Record<string, SessionMapEntry>>
   /** 保存 ACP 会话映射；失败由实现方吞掉。 */
@@ -233,6 +238,25 @@ interface ReusedSession {
 
 /** 有界历史重放兜底的默认字符预算。 */
 const DEFAULT_REPLAY_MAX_CHARS = 120_000
+/** 目录未报告容量时的默认上下文窗口（tokens）。 */
+const DEFAULT_CONTEXT_WINDOW = 1_048_576
+/** Claude 家族的保守上限：目录不报告容量时按 200k 处理，避免高估导致上游截断。 */
+const CLAUDE_CONTEXT_WINDOW = 200_000
+
+/**
+ * 目录未报告容量时的兜底上下文窗口。
+ *
+ * 官方 ACP 目录只给模型 id/名称，真实容量要等 `usage_update` 才能观测到；
+ * DSH 在切换模型时要靠它计算压缩目标，缺省会报
+ * `MODEL_SWITCH_COMPACTION_FAILED: no context capacity`。这里只做**可配置的
+ * 保守默认**（settings.defaultContextWindow），Claude 家族封顶 200k；
+ * 配置为 0 时恢复旧行为（不填容量）。
+ */
+export function fallbackContextWindow(model: string, configured: number): number | undefined {
+  if (!Number.isFinite(configured) || configured <= 0) return undefined
+  if (/^claude/i.test(model)) return Math.min(configured, CLAUDE_CONTEXT_WINDOW)
+  return configured
+}
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60_000
 const DEFAULT_SESSION_TIMEOUT_MS = 120_000
 const DEFAULT_PARK_SETTLE_MS = 50
@@ -275,6 +299,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   #replayFallback: boolean
   /** 重放兜底的历史预算（字符数）。 */
   #replayMaxChars: number
+  /** 目录未报告容量时的兜底上下文窗口（0 表示不填）。 */
+  #defaultContextWindow: number
   /** 取消后的确认定时器；agent 先确认停止就取消回收。 */
   #cancelGrace: { timer: ReturnType<typeof setTimeout>; link: AgentLink; turn: PromptTurn; pending: Promise<void>; resolve(): void } | undefined
   /** 保留进程的空闲回收定时器；有新回合就撤销。 */
@@ -388,6 +414,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     this.#idleRecycleMs = Math.max(0, options.idleRecycleMs ?? 0)
     this.#replayFallback = options.replayFallback ?? true
     this.#replayMaxChars = Math.max(1_000, options.replayMaxChars ?? DEFAULT_REPLAY_MAX_CHARS)
+    this.#defaultContextWindow = Math.max(0, options.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW)
     this.#readImage = options.readImage
     this.#canReadImages = options.canReadImages
     this.#bridge = new McpToolBridge({
@@ -512,6 +539,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     this.#idleRecycleMs = Math.max(0, settings.idleRecycleMs ?? 0)
     this.#replayFallback = settings.replayFallback ?? true
     this.#replayMaxChars = Math.max(1_000, settings.replayMaxChars ?? DEFAULT_REPLAY_MAX_CHARS)
+    this.#defaultContextWindow = Math.max(0, settings.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW)
     if (this.#sessionStore !== settings.sessionStore) this.#sessionStore?.release(this.#sessionOwner)
     this.#sessionStore = settings.sessionStore
   }
@@ -746,9 +774,10 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     // 显示名覆盖对已知与未知路由键都生效：用户在设置页改了名字，选择器与
     // 会话标题都要一致，不能只在 listModels 里生效。
     const displayName = modelDisplayName(this.#modelSettingsSnapshot(), model, known?.name ?? model)
-    // 上下文容量只在**实测**过（usage_update.size）或缓存过时才声明；官方目录
-    // 不报告容量，绝不填猜测值。缺省时不带 context，压缩引擎按未知处理。
+    // 上下文容量优先用实测值（usage_update.size / 缓存）；没观测过的模型用
+    // 可配置的兜底窗口，否则 DSH 切换模型时没有容量可用、压缩直接失败。
     const contextWindow = this.#contextWindows.get(model)
+      ?? fallbackContextWindow(model, this.#defaultContextWindow)
     // 没有档位变体的模型必须省略 reasoning（宿主拒绝空 efforts）。
     const reasoning = this.#reasoningInfo(model, tiers)
     return {

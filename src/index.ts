@@ -677,6 +677,7 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
       resumeSessions: config.resumeSessions,
       replayFallback: config.replayFallback,
       replayMaxChars: config.replayMaxChars,
+      defaultContextWindow: config.defaultContextWindow,
       cancelGraceMs: config.cancelGraceMs,
       idleRecycleMs: config.idleRecycleMs,
       sessionStore: config.resumeSessions ? sessionStore : undefined,

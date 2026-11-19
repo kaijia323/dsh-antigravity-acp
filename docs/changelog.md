@@ -4,6 +4,12 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.4 · 2026-11-19（kaijia323 fork）
+
+- **修复：切换到未观测容量的模型时 DSH 报 `MODEL_SWITCH_COMPACTION_FAILED`**（`no context capacity for antigravity-acp/gemini-4-hydrogen`）。官方 ACP 目录只报告模型 id/名称，真实上下文容量要等会话 `usage_update` 才能观测到；从 DeepSeek（1M）切到从未用过的 `gemini-4-hydrogen` 时 DSH 无法计算压缩目标，直接拒绝切换并保留原模型。现在 `resolveModel()` 对未观测模型给出可配置兜底窗口 `defaultContextWindow`（默认 **1048576**；Claude 家族封顶 **200000**；设 0 恢复旧行为），实测值仍然优先。
+- 真机路径：用户先跑 DeepSeek，再切 Gemini 4 Hydrogen → 旧版 100% 失败；新版切换不再因容量缺失被拒。
+- 单测：`tests/context-window.test.ts`（默认值、Claude 封顶、0/非法值关闭）。
+
 ## 0.3.2-fork.3 · 2026-11-19（kaijia323 fork）
 
 - **新增：有界历史重放兜底（`replayFallback`，默认开启）**。旧行为是会话接不上一律报 `AGY_SESSION_UNRECOVERABLE` 永久失效；现在先照常尝试 `session/resume`，失败（历史被改写、取消/停止后游标失效、映射缺失等）才用 `boundedHistory()` 取**最近若干消息**（默认上限 120000 字符）新建 ACP 会话继续对话，并在日志里写明「按有界历史重放新建会话」。`replayFallback: false` 可恢复旧行为；`replayMaxChars` 调整预算。
