@@ -76,7 +76,7 @@ ACP 官方 agent 在同一会话内会保留上下文（2026-10-23 真机验证�
 | `AGY_ACP_HOME` | 官方程序与独立运行目录的用户级安装根目录覆盖；应避开 Windows Low 完整性目录。 |
 | `AGY_CLI_BIN` | 官方 CLI 路径覆盖，低于显式 `agyCliPath`。 |
 | `AGY_ACP_ACCOUNTS_DIR` | 多账号根目录覆盖（默认 `~/.antigravity-acp-accounts`），内含 `accounts.json` 与每个隔离账号的 HOME。 |
-| `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` | OAuth client 元数据覆盖，配对使用；不是模型 API Key，也不是用户 access / refresh token。通常不需要手动设置，不应随文档或截图分享。 |
+| `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` | OAuth client 元数据覆盖，配对使用；不是模型 API Key，也不是用户 access / refresh token。通常不需要手动设置，不应随文档或截图分享。不设时依次回落到本机官方分发物与已审计的 Antigravity client。 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 与小写形式 | `proxyUrl` 未设置时的第一来源；没有环境变量时再检测系统代理。实际选择与注入见 [`proxy-env.ts`](https://github.com/KouzakiUmi/dsh-antigravity-acp/blob/main/src/runtime/proxy-env.ts)。 |
 | `NO_PROXY` 与小写形式 | Host 代理绕过来源；本机 loopback 始终加入。 |
 | `DSH_HOME` | 模型目录缓存所在宿主目录；**不是**默认官方程序与运行代码安装位置。 |
@@ -89,6 +89,8 @@ ACP 官方 agent 在同一会话内会保留上下文（2026-10-23 真机验证�
 自动下载的 zip 解压受三道上限约束：条目数 2000、单条目 512MB、解压总量 1GB。官方包解压后约 200–300MB、条目数十个，正常下载不会触及；超过任一道即报 `AGY_ARCHIVE_TOO_LARGE` 并放弃本次安装，不留半成品。这是下载域名白名单之外的压缩炸弹纵深防御。
 
 **CLI：** `agyCliPath` → `AGY_CLI_BIN` → PATH → 平台默认位置。显式覆盖与候选读取细节以 [`agy-cli.ts`](https://github.com/KouzakiUmi/dsh-antigravity-acp/blob/main/src/runtime/agy-cli.ts) 为准；手动刷新会重新探测，不要求插件加载时 CLI 就已安装。
+
+**OAuth client 元数据：** `AGY_OAUTH_CLIENT_ID`/`_SECRET` → 本机官方分发物（agy CLI、已解压的 ACP server；按块扫描）→ 已审计的 Antigravity client。分发物按块解码匹配：1.5.x 的 Linux ACP server 已达 714MB，超过 V8 单字符串上限（约 512MB），整文件读成字符串会静默失败。
 
 **代理：** 非空 `proxyUrl` 使用显式代理；留空先按 Host 环境、再按系统代理选择；都没有才直连。代理失败不会静默直连。[代理行为与诊断](reference.md#出网代理)
 

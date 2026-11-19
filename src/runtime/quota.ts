@@ -4,11 +4,15 @@
  * 数据面（用户 2026-10-16 明确选择 A 方案，放宽「bundle 不读 OAuth 凭据」约束）：
  * 1. 读官方 CLI 登录态 `~/.gemini/antigravity-cli/antigravity-oauth-token`；
  * 2. access token 过期时用其中的 refresh_token 向 Google OAuth token 端点换新
- *    （client 元数据取自官方二进制或 AGY_OAUTH_CLIENT_ID/SECRET 环境变量）；
+ *    （client 元数据：AGY_OAUTH_CLIENT_ID/SECRET → 本机官方分发物 → 已审计 client）；
  * 3. 调用 Cloud Code Assist 的 `loadCodeAssist` → `retrieveUserQuotaSummary`。
  *
  * 边界（保持克制）：
  * - **只读凭据，绝不写回**：刷新出的 access token 只在内存里用，不改官方登录文件；
+ * - **client 元数据不编造**：只取真实存在的一份（环境变量 / 本机官方分发物 / auth-core
+ *   里已审计的 Antigravity client），按「id 与 secret 出自同一 client」配对；分发物按
+ *   分块扫描——1.5.x 的 Linux ACP server 已达 714MB，超过 V8 单字符串上限（约 512MB），
+ *   整文件读成字符串会抛 `Invalid string length`；
  * - 任何错误消息在进入快照/日志前都过 `redactSensitiveText`，token 材料一律不出现在
  *   返回值、错误文本与诊断里；
  * - 失败不抛穿线，而是返回 `status: 'error'` 的快照，让 UI 显示可读原因。
@@ -16,7 +20,7 @@
  * API 形态取自官方协议与公开实现的**事实**（端点、字段名、0..1 的
  * remainingFraction），代码为本项目原创实现。
  */
-import { readFile, readdir } from 'node:fs/promises'
+import { open, readFile, readdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -51,6 +55,7 @@ export const QUOTA_HTTP_TIMEOUT_MS = 20_000
 export type QuotaErrorCode =
   | 'token-missing'
   | 'token-expired'
+  /** 历史错误码：client 元数据不可得。现在总会回落到已审计 client，不再产生。 */
   | 'refresh-unavailable'
   | 'refresh-failed'
   | 'request-failed'
@@ -114,19 +119,30 @@ export interface QuotaTokenState {
   expiry?: string
 }
 
+/** client 元数据来源：环境变量 / 本机官方分发物 / 插件内置已审计 client。 */
+export type OAuthClientSource = 'env' | 'binary' | 'audited'
+
 /** OAuth 客户端元数据（官方安装型客户端的公开标识，不是用户凭据）。 */
 export interface OAuthClientMeta {
   clientId: string
   clientSecret: string
+  /** 元数据来源；换发被拒时用来给可行动提示。 */
+  source?: OAuthClientSource
 }
 
 /** 取数依赖面：全部可注入，测试用假实现，不碰真实网络与真实凭据。 */
 export interface QuotaDeps {
   fetchImpl?: typeof fetch
+  /** 读文本文件（官方登录态）；测试注入用。 */
   readFileImpl?: (path: string) => Promise<string>
+  /** 官方二进制的分块文本流（测试注入用）；缺省直接分块读文件。 */
+  binaryChunkStreamImpl?: (path: string) => AsyncIterable<string>
   env?: Readonly<Record<string, string | undefined>>
   now?: () => number
+  /** 账号 HOME（读登录态用；多账号下会被覆盖成隔离账号的 HOME）。 */
   homedir?: () => string
+  /** 用户级 HOME（安装根/缓存用）；缺省为操作系统的真实 homedir，不随账号隔离移动。 */
+  systemHomedir?: () => string
   /** 可执行文件安装根；与模型/额度数据分开。 */
   installRoot?: string
   /** 设置中显式选择的官方 CLI 路径，优先于环境变量和 PATH。 */
@@ -149,13 +165,15 @@ function defaultReadFile(path: string): Promise<string> {
 }
 
 /**
- * 读官方二进制用于正则提取 client 元数据：按 latin1 解码。
- * 目标串全是 ASCII，latin1 逐字节映射，结果与 utf8 等价；而 utf8 解码 200MB 级
- * 二进制要 ~700ms（实测），latin1 只要 ~60ms。
+ * 官方二进制分块扫描的块大小（字节）：远小于 V8 单字符串上限（约 512MB），
+ * 714MB 级分发物也不会撞上限。
  */
-function defaultReadBinary(path: string): Promise<string> {
-  return readFile(path, 'latin1')
-}
+const BINARY_SCAN_CHUNK_BYTES = 8 * 1024 * 1024
+/**
+ * 块间保留的重叠字符数：client id 最长 70 余字符、secret 35 字符，留足余量
+ * 保证跨块边界的 id/secret 仍能命中。
+ */
+const BINARY_SCAN_OVERLAP_CHARS = 256
 
 /**
  * 本次请求实际生效的超时（毫秒）。非正数视为「未设置」并回落到默认值。
@@ -226,72 +244,160 @@ export function isTokenUsable(state: QuotaTokenState, nowMs: number, marginMs = 
   return expiresAt - nowMs > marginMs
 }
 
-/** 从官方二进制文本里提取 client 元数据（正则即时编译匹配，不留模块级全局状态）；取不到返回 undefined（不猜值）。 */
-export function parseOAuthClientFromBinary(text: string): OAuthClientMeta | undefined {
-  const ids: string[] = text.match(/\d+-[a-z0-9]+\.apps\.googleusercontent\.com/g) ?? []
-  const secrets: string[] = text.match(/GOCSPX-[A-Za-z0-9_-]{28}/g) ?? []
-  if (ids.length === 0 || secrets.length === 0) return undefined
-  // 官方分发物里可能同时打包多组 client（实测 agy 1.5.9 Linux 有三组：Gemini CLI、
-  // antigravity 及其它内部客户端）。位置配对在真实二进制上不稳定：选中的那一对
-  // 会让 OAuth 端点回 `invalid_client` / `unauthorized_client`，表现为「换发 401」。
-  // 已审计实现里那份 Antigravity client 才是本链路真正在用的，两半都在就优先它；
-  // 不在时保持原来的位置配对，绝不编造。
-  if (ids.includes(ANTIGRAVITY_CLIENT_ID) && secrets.includes(ANTIGRAVITY_CLIENT_SECRET)) {
-    return { clientId: ANTIGRAVITY_CLIENT_ID, clientSecret: ANTIGRAVITY_CLIENT_SECRET }
+/** 官方二进制里 client 元数据的匹配器（只读，不用 lastIndex）。 */
+const CLIENT_ID_PATTERN = /\d+-[a-z0-9]+\.apps\.googleusercontent\.com/g
+const CLIENT_SECRET_PATTERN = /GOCSPX-[A-Za-z0-9_-]{28}/g
+
+/** 一个 client 元数据片段及其在分发物里的绝对位置（配对靠位置）。 */
+interface ClientCandidate {
+  value: string
+  at: number
+}
+
+/** 收集匹配片段；块间重叠会让同一片段被重复匹配，按绝对位置去重。 */
+function collectClientCandidates(
+  text: string,
+  base: number,
+  sinks: { ids: ClientCandidate[]; secrets: ClientCandidate[] },
+): void {
+  for (const match of text.matchAll(CLIENT_ID_PATTERN)) {
+    const index = match.index ?? 0
+    // 块边界可能把一个 client id 从数字串中间切断：剩余部分（如 `90-abc…`）本身
+    // 又是合法的 id 形态，会以「幻影 id」进入候选，且位置去重去不掉它。
+    // 这种截断尾巴只可能出现在本块起点（index 0，base>0）；真正的起点在上一个
+    // 块里、早已按正确绝对位置收集过（token 长度 << 256 字符重叠窗），因此丢弃安全。
+    if (index === 0 && base > 0) continue
+    const at = base + index
+    if (!sinks.ids.some((entry) => entry.at === at)) sinks.ids.push({ value: match[0], at })
   }
-  // 与官方 CLI 同源的最后一条 client id 最可能是当前在用的。
-  const clientId = ids[ids.length - 1] as string
-  // 多份元数据同时存在时必须按「相邻出现」配对，不能固定取第一条 secret：
-  // 那样配出来的 id/secret 可能来自不同的 client，换发会被 OAuth 端点拒绝。
-  // 单份元数据时（实测官方 CLI 就是这种）本规则退化为直接命中。
-  const anchor = text.lastIndexOf(clientId)
-  // 同一 secret 在二进制里可能出现多次（多个 client 共用或打包重复）：只取首次
-  // 出现会落到 anchor 之前，让本该配上的那份被误判成「在 id 之前」。因此先找
-  // anchor 之后的出现位置，找不到再回退到首次出现。
-  const positions = secrets.map((secret) => {
-    const afterAnchor = text.indexOf(secret, anchor + 1)
-    return { secret, at: afterAnchor >= 0 ? afterAnchor : text.indexOf(secret) }
-  })
-  // 同一份元数据里 secret 紧跟 id；多份时按文档顺序取该 id 之后的第一个 secret，
-  // 之后没有了才回退到它之前的最后一个（极少数只写 secret 的打包形态）。
-  const after = positions.filter((entry) => entry.at > anchor).sort((a, b) => a.at - b.at)[0]
-  const chosen = after ?? positions.filter((entry) => entry.at >= 0).sort((a, b) => b.at - a.at)[0]
-  return chosen === undefined ? undefined : { clientId, clientSecret: chosen.secret }
+  for (const match of text.matchAll(CLIENT_SECRET_PATTERN)) {
+    const at = base + (match.index ?? 0)
+    if (!sinks.secrets.some((entry) => entry.at === at)) sinks.secrets.push({ value: match[0], at })
+  }
 }
 
 /**
- * 解析 OAuth client 元数据：环境变量优先，其次扫描官方二进制。
- * 两者都拿不到就返回 undefined —— 由调用方报「无法换发 token」，绝不编造 client。
+ * 按位置配对 client id 与 secret；取不到返回 undefined（绝不拼凑）。
+ *
+ * 官方分发物里可能同时打包多组 client（实测 agy 1.5.9 Linux 有三组：Gemini CLI、
+ * antigravity 及其它内部客户端）。位置配对在真实二进制上不稳定：选中的那一对
+ * 会让 OAuth 端点回 `invalid_client` / `unauthorized_client`，表现为「换发 401」。
+ * 已审计实现里那份 Antigravity client 才是本链路真正在用的，两半都在就优先它；
+ * 不在时取「最后一个 id 之后位置最近的 secret」，绝不编造。
  */
-export async function resolveOAuthClient(deps: QuotaDeps = {}): Promise<OAuthClientMeta | undefined> {
+function pickOAuthClient(ids: ClientCandidate[], secrets: ClientCandidate[]): OAuthClientMeta | undefined {
+  if (ids.length === 0 || secrets.length === 0) return undefined
+  if (ids.some((entry) => entry.value === ANTIGRAVITY_CLIENT_ID)
+    && secrets.some((entry) => entry.value === ANTIGRAVITY_CLIENT_SECRET)) {
+    return { clientId: ANTIGRAVITY_CLIENT_ID, clientSecret: ANTIGRAVITY_CLIENT_SECRET }
+  }
+  // 与官方 CLI 同源的最后一条 client id 最可能是当前在用的。
+  const last = ids[ids.length - 1] as ClientCandidate
+  // 同一份元数据里 secret 紧跟 id；多份时取该 id 之后位置最近的 secret。
+  const after = secrets.filter((entry) => entry.at > last.at).sort((a, b) => a.at - b.at)[0]
+  if (after !== undefined) return { clientId: last.value, clientSecret: after.value }
+  // 之后没有 secret：按旧规则回退到「首次出现位置最后」的那份（极少数只写 secret
+  // 的打包形态）；保持与整文本解析一致的语义。
+  const firstAt = new Map<string, number>()
+  for (const entry of secrets) if (!firstAt.has(entry.value)) firstAt.set(entry.value, entry.at)
+  let chosen: ClientCandidate | undefined
+  for (const [value, at] of firstAt) {
+    if (chosen === undefined || at > chosen.at) chosen = { value, at }
+  }
+  return chosen === undefined ? undefined : { clientId: last.value, clientSecret: chosen.value }
+}
+
+/** 从官方二进制文本里提取 client 元数据；取不到返回 undefined（不猜值）。 */
+export function parseOAuthClientFromBinary(text: string): OAuthClientMeta | undefined {
+  const sinks = { ids: [] as ClientCandidate[], secrets: [] as ClientCandidate[] }
+  collectClientCandidates(text, 0, sinks)
+  return pickOAuthClient(sinks.ids, sinks.secrets)
+}
+
+/**
+ * 从**分块**文本流里提取 client 元数据。
+ *
+ * 分块是硬要求：V8 单字符串上限约 512MB（`buffer.constants.MAX_STRING_LENGTH`
+ * = 536,870,888），而 1.5.x 的 Linux `agy_acp_server.par` 已到 714MB；旧实现整文件
+ * `readFile(path, 'latin1')` 会抛 `Invalid string length`，被 catch 掉后静默返回
+ * undefined，表现为 access token 每小时过期时额度读取都报「拿不到 OAuth client
+ * 元数据」。这里按块解码、保留尾部重叠再匹配，内存只占一块。
+ */
+export async function parseOAuthClientFromChunks(
+  chunks: AsyncIterable<string>,
+): Promise<OAuthClientMeta | undefined> {
+  const sinks = { ids: [] as ClientCandidate[], secrets: [] as ClientCandidate[] }
+  let carry = ''
+  let consumed = 0
+  for await (const chunk of chunks) {
+    const text = carry + chunk
+    // 绝对位置 = 已消费字符数 - 重叠段长度（carry 是上块尾部重复的内容）。
+    collectClientCandidates(text, consumed - carry.length, sinks)
+    carry = text.slice(-BINARY_SCAN_OVERLAP_CHARS)
+    consumed += chunk.length
+  }
+  return pickOAuthClient(sinks.ids, sinks.secrets)
+}
+
+/**
+ * 按块读取官方二进制并解码成文本流：latin1 逐字节映射，目标串全是 ASCII。
+ * 用 utf8 解码 200MB 级二进制要 ~700ms（实测），latin1 只要 ~60ms。
+ */
+async function* readBinaryChunks(path: string): AsyncGenerator<string> {
+  const handle = await open(path, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(BINARY_SCAN_CHUNK_BYTES)
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, 0, BINARY_SCAN_CHUNK_BYTES, null)
+      // 只有 EOF 才结束：定期文件读通常一次读完，但短读（信号/NFS）不能被当 EOF，
+      // 否则会静默漏掉后半截分发物。
+      if (bytesRead === 0) return
+      yield buffer.subarray(0, bytesRead).toString('latin1')
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * 解析 OAuth client 元数据，来源优先级：
+ * 1. `AGY_OAUTH_CLIENT_ID` / `AGY_OAUTH_CLIENT_SECRET` 环境变量；
+ * 2. 本机官方分发物（agy CLI / 已解压的 ACP server，**分块**扫描）；
+ * 3. `@cortexkit/antigravity-auth-core` 里已审计的 Antigravity client——设置页的
+ *    OAuth 登录本就用这一对，登录出来的 refresh_token 与它配套。
+ *
+ * 三者都是真实存在的 client，不编造；返回值带 `source`，换发 401 时据此给提示。
+ */
+export async function resolveOAuthClient(deps: QuotaDeps = {}): Promise<OAuthClientMeta> {
   const env = deps.env ?? process.env
   const clientId = env.AGY_OAUTH_CLIENT_ID?.trim()
   const clientSecret = env.AGY_OAUTH_CLIENT_SECRET?.trim()
-  if (clientId && clientSecret) return { clientId, clientSecret }
-  const readFileImpl = deps.readFileImpl ?? defaultReadBinary
+  if (clientId && clientSecret) return { clientId, clientSecret, source: 'env' }
+  const streamOf = deps.binaryChunkStreamImpl ?? readBinaryChunks
   for (const candidate of await candidateBinaryPaths(deps)) {
     try {
-      const text = await readFileImpl(candidate)
-      const meta = parseOAuthClientFromBinary(text)
-      if (meta) return meta
+      const meta = await parseOAuthClientFromChunks(streamOf(candidate))
+      if (meta) return { ...meta, source: 'binary' }
     } catch {
       // 读不到就试下一个候选；提取失败不是致命错误。
     }
   }
-  return undefined
+  return { clientId: ANTIGRAVITY_CLIENT_ID, clientSecret: ANTIGRAVITY_CLIENT_SECRET, source: 'audited' }
 }
 
 /** 官方二进制候选：缓存里的 agy_acp_server + 本机官方 agy CLI。
  *
  * 实测（2026-10-16，本机）：OAuth client 元数据只随 **agy CLI** 发行，
- * `agy_acp_server.exe` 里没有；因此两个来源都要扫，扫不到就报
- * `refresh-unavailable`，绝不猜 client。
+ * `agy_acp_server.exe` 里没有；因此两个来源都要扫。
  */
 async function candidateBinaryPaths(deps: QuotaDeps): Promise<string[]> {
   if (deps.binaryPaths) return [...deps.binaryPaths]
   const home = (deps.homedir ?? homedir)()
   const env = deps.env ?? process.env
-  const installRoot = deps.installRoot ?? resolveInstallRoot(env, process.platform, () => home)
+  // 安装根是**用户级**的：隔离账号只覆盖 HOME（登录态按 HOME 读），缓存里的官方
+  // 二进制仍在真实用户目录下。用账号 HOME 推这里会指向
+  // `<账号 HOME>/.cache/dsh-antigravity-host/...`（不存在），扫描必然落空。
+  const installRoot = deps.installRoot ?? resolveInstallRoot(env, process.platform, deps.systemHomedir ?? homedir)
   const { extractDir } = versionCachePaths(installRoot, deps.acpVersion ?? DEFAULT_ACP_SERVER_VERSION)
   const names = process.platform === 'win32'
     ? ['agy.exe', 'agy_acp_server.exe', 'agy-acp-server.exe']
@@ -459,13 +565,10 @@ async function fetchQuotaSnapshotUncached(deps: QuotaDeps): Promise<QuotaSnapsho
     }
     if (!isTokenUsable(state, now())) {
       const client = await resolveOAuthClient(deps)
-      if (!client) {
-        return failure(stamp(), 'refresh-unavailable', 'access token 已过期且无法取得 OAuth client 元数据（可设 AGY_OAUTH_CLIENT_ID/SECRET）')
-      }
       try {
         state = await refreshAccessToken(state, client, deps)
       } catch (error) {
-        return failure(stamp(), 'refresh-failed', describeError(error))
+        return failure(stamp(), 'refresh-failed', describeRefreshFailure(error, client))
       }
     }
     const accessToken = state.accessToken as string
@@ -498,8 +601,12 @@ async function retryAfterRefresh(
 ): Promise<QuotaSnapshot> {
   try {
     const client = await resolveOAuthClient(deps)
-    if (!client) return failure(stamp(), 'refresh-unavailable', '请求被拒（401/403）且无法取得 OAuth client 元数据')
-    const refreshed = await refreshAccessToken(state, client, deps)
+    let refreshed: QuotaTokenState
+    try {
+      refreshed = await refreshAccessToken(state, client, deps)
+    } catch (error) {
+      return failure(stamp(), 'refresh-failed', describeRefreshFailure(error, client))
+    }
     const project = await loadCodeAssist(refreshed.accessToken as string, deps)
     const summary = await postCodeAssist(
       'retrieveUserQuotaSummary',
@@ -572,6 +679,23 @@ function errorCodeOf(error: unknown): QuotaErrorCode {
 
 function describeError(error: unknown): string {
   return redactSensitiveText(error instanceof Error ? error.message : String(error))
+}
+
+/**
+ * 换发失败文案：回落到已审计 client 时若被 OAuth 端点拒（401/403），说明该 client
+ * 与 refresh_token 的签发方不一致（系统账号的 token 由官方 CLI 签发），要给出可
+ * 行动提示，而不是让用户对着「拿不到 client 元数据」猜。
+ */
+function describeRefreshFailure(error: unknown, client: OAuthClientMeta): string {
+  const message = describeError(error)
+  // 按「实际用的 client 是不是已审计那一对」判断，而不是只看来路：分发物里命中的
+  // 往往正是已审计那一对（source 会是 binary）。Google 对 invalid_client /
+  // invalid_grant 都可能回 400，所以 400/401/403 一并给提示。
+  const audited = client.clientId === ANTIGRAVITY_CLIENT_ID && client.clientSecret === ANTIGRAVITY_CLIENT_SECRET
+  if (audited && error instanceof QuotaError && (error.status === 400 || error.status === 401 || error.status === 403)) {
+    return `${message}；可能是已审计 client 与本机登录态的签发方不一致，或登录态已失效：系统账号请先用官方 agy CLI 登录，或在 Host 环境设置 AGY_OAUTH_CLIENT_ID/SECRET`
+  }
+  return message
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

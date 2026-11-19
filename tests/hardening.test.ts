@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AnyMessage, Stream } from '@agentclientprotocol/sdk'
-import { versionCachePaths } from '../src/runtime/binary.js'
+import { INSTALL_DIR_NAME, versionCachePaths } from '../src/runtime/binary.js'
 import { AgentLink } from '../src/protocol/agent-link.js'
 import { ensureAcpCredentials } from '../src/runtime/credentials.js'
 import { resolveOAuthClient } from '../src/runtime/quota.js'
@@ -206,7 +206,10 @@ describe('resolveOAuthClient 的二进制扫描', () => {
       const client = await resolveOAuthClient({
         env: { AGY_ACP_HOME: installRoot, AGY_CLI_BIN: explicitCli, DSH_HOME: dataCache },
         homedir: () => root,
-        readFileImpl: async (path) => { visited.push(path); return path === join(extractDir, serverName) ? CLIENT_TEXT : 'no metadata' },
+        binaryChunkStreamImpl: async function* (path) {
+          visited.push(path)
+          yield path === join(extractDir, serverName) ? CLIENT_TEXT : 'no metadata'
+        },
       })
       expect(client?.clientId).toBe('12345-abcdef.apps.googleusercontent.com')
       expect(visited[0]).toBe(explicitCli)
@@ -215,14 +218,40 @@ describe('resolveOAuthClient 的二进制扫描', () => {
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
+  it.skipIf(process.platform === 'win32')('隔离账号（HOME 被覆盖）仍从真实用户缓存里扫官方分发物', async () => {
+    // 回归：安装根是**用户级**的缓存，不能从被账号隔离覆盖的 HOME 推。
+    // 旧实现按账号 HOME 算 installRoot，扫描指向 <账号 HOME>/.cache/...（不存在），
+    // 于是 access token 每小时过期后额度读取都报「拿不到 OAuth client 元数据」。
+    const root = await mkdtemp(join(tmpdir(), 'agy-oauth-account-'))
+    const accountHome = join(root, 'account-home')
+    const systemHome = join(root, 'system-home')
+    // 只替换 systemHomedir：旧实现用 deps.homedir 推安装根会指向账号 HOME，本用例会失败。
+    const extractDir = versionCachePaths(join(systemHome, '.cache', INSTALL_DIR_NAME), '1.5.0').extractDir
+    const serverName = process.platform === 'win32' ? 'agy_acp_server.exe' : 'agy_acp_server.par'
+    try {
+      await mkdir(extractDir, { recursive: true })
+      await writeFile(join(extractDir, serverName), CLIENT_TEXT)
+      const client = await resolveOAuthClient({
+        env: {},
+        homedir: () => accountHome,
+        systemHomedir: () => systemHome,
+        acpVersion: '1.5.0',
+      })
+      expect(client?.clientId).toBe('12345-abcdef.apps.googleusercontent.com')
+      expect(client?.source).toBe('binary')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('显式 binaryPaths 保持调用方给定的顺序并能解析出 client', async () => {
     const order: string[] = []
     const client = await resolveOAuthClient({
       env: {},
       binaryPaths: ['/cache/agy_acp_server', '/bin/agy'],
-      readFileImpl: async (path: string) => {
+      binaryChunkStreamImpl: async function* (path: string) {
         order.push(path)
-        return path === '/bin/agy' ? CLIENT_TEXT : 'no client here'
+        yield path === '/bin/agy' ? CLIENT_TEXT : 'no client here'
       },
     })
     expect(client?.clientId).toBe('12345-abcdef.apps.googleusercontent.com')
@@ -242,7 +271,7 @@ describe('resolveOAuthClient 的二进制扫描', () => {
         homedir: () => '/home/u',
         installRoot: cacheDir,
         acpVersion: '1.4.0',
-        readFileImpl: async (path: string) => {
+        binaryChunkStreamImpl: async function* (path: string) {
           order.push(path)
           throw new Error('ENOENT')
         },

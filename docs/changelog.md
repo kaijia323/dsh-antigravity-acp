@@ -4,6 +4,16 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.6 · 2026-11-20（kaijia323 fork）
+
+- **修复：access token 每小时过期后额度读取报「access token 已过期且无法取得 OAuth client 元数据（可设 AGY_OAUTH_CLIENT_ID/SECRET）」**。三个叠加原因：
+  1. **分块扫描**：1.5.0 Linux `agy_acp_server.par` 已达 **714MB**，超过 V8 单字符串上限（`MAX_STRING_LENGTH` = 536,870,888）；旧实现 `readFile(path, 'latin1')` 抛 `Invalid string length` 后被 `catch` 静默吞掉，client 元数据恒为 undefined。现在按 8MB 块解码、保留 256 字符重叠匹配、按绝对位置去重配对，内存只占一块（真机扫描 714MB 约 0.9–1.1s）；块边界把 id 从数字串中间切断时，剩余尾巴（如 `567890-abc…` 本身也是合法 id 形态）会被判为截断尾巴丢弃，不再产生顶替真 id 的「幻影 id」（fuzz 5000 例与整文本解析 0 差异）；
+  2. **安装根不再跟随账号隔离 HOME**：缓存里的官方二进制属于**用户级**目录（`$XDG_CACHE_HOME` / `~/.cache/dsh-antigravity-host`），旧实现用被覆盖的账号 HOME 推 installRoot，扫描必然指向不存在的路径；
+  3. **已审计 client 兜底**：环境变量与分发物都拿不到时，回落到 `@cortexkit/antigravity-auth-core` 里已审计的 Antigravity client（设置页 OAuth 登录本就用这一对）；换发被 OAuth 端点拒时给出可行动提示，而不是让用户对着「拿不到元数据」猜。
+  4. **提示覆盖与边界**：换发失败按「实际用的 client 是不是已审计那一对」判断（分发物里命中的往往正是这一对），并覆盖 **400/401/403**（Google 对 `invalid_client` / `invalid_grant` 都可能回 400）；`parseOAuthClientFromBinary` 的整文本回退配对语义（最后一条 id 之后没有 secret 时取「首次出现位置最后」的 secret）与分块路径统一，不引入兼容性变化；分块读文件只在 EOF 结束，短读不被误当结尾。
+- 额度读取仍只读凭据、不写回登录文件；单测新增跨块边界匹配、幻影 id、隔离 HOME 安装根（注入 `systemHomedir`，旧实现用 `deps.homedir` 推安装根会真实失败）、已审计兜底与 400/401 提示等回归。
+- 真机验证：隔离账号 token 过期状态下 `resolveOAuthClient` 返回 `source=binary`，额度快照 `status=ok`（Google AI Pro，3 组额度）。
+
 ## 0.3.2-fork.5 · 2026-11-19（kaijia323 fork）
 
 - **修复：切换模型时思考档位（如 `xhigh`）跨模型残留导致 `AGY_EFFORT_UNSUPPORTED`**。

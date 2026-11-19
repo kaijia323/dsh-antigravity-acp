@@ -12,6 +12,7 @@ import {
   loadCodeAssist,
   OAUTH_TOKEN_URL,
   parseOAuthClientFromBinary,
+  parseOAuthClientFromChunks,
   parseQuotaSummary,
   parseTokenState,
   refreshAccessToken,
@@ -159,6 +160,45 @@ describe('OAuth client 元数据提取', () => {
     // 把本该配给 CLIENT_ID 的那份误判成「在 id 之前」。
     const text = `${otherId} ${shared} ... ${CLIENT_ID} ${shared} ... tail`
     expect(parseOAuthClientFromBinary(text)).toEqual({ clientId: CLIENT_ID, clientSecret: shared })
+  })
+
+  it('分块文本流里跨块边界的 id/secret 仍能匹配（714MB 级分发物不能整读）', async () => {
+    // 旧实现 readFile(path, 'latin1') 会撞 V8 单字符串上限（约 512MB）；
+    // 分块扫描必须保证 id/secret 被切在块边界时也能命中。
+    const split = CLIENT_ID.length - 12
+    async function* chunks(): AsyncGenerator<string> {
+      yield `noise ${CLIENT_ID.slice(0, split)}`
+      yield `${CLIENT_ID.slice(split)} noise GOCSPX-`
+      yield `${CLIENT_SECRET.slice('GOCSPX-'.length)} tail`
+    }
+    expect(await parseOAuthClientFromChunks(chunks())).toEqual({ clientId: CLIENT_ID, clientSecret: CLIENT_SECRET })
+  })
+
+  it('carry 起点落在 client id 数字串内时不产生截断的幻影 id', async () => {
+    // 块边界把 id 从数字串中间切断时，剩余部分（如 `567890-abc…`）本身也是合法的
+    // id 形态；它必须以「块边界截断尾巴」丢弃，而不是顶替真正的最后一条 id。
+    const id = ['1234567890', '-abcdef.apps.googleusercontent.com'].join('')
+    const secret = ['GOCSPX-', 'AbCdEfGhIjKlMnOpQrStUvWxYz01'].join('')
+    // 第一块长度 560、id 从 300 开始（数字串 300..309）；第二块起点 - 256 重叠窗
+    // 恰好落在数字串内（304），carry 以 `567890-abc…` 开头。
+    const firstChunk = `${'p'.repeat(300)}${id}${'q'.repeat(560 - 300 - id.length)}`
+    const secondChunk = `${'r'.repeat(100)} ${secret}`
+    async function* chunks(): AsyncGenerator<string> {
+      yield firstChunk
+      yield secondChunk
+    }
+    const expected = { clientId: id, clientSecret: secret }
+    expect(await parseOAuthClientFromChunks(chunks())).toEqual(expected)
+    // 整文本解析结论必须一致（块扫描不改变配对结果）。
+    expect(parseOAuthClientFromBinary(firstChunk + secondChunk)).toEqual(expected)
+  })
+
+  it('分块流里没有成对的 id/secret 时返回 undefined', async () => {
+    async function* chunks(): AsyncGenerator<string> {
+      yield `noise ${CLIENT_ID}`
+      yield ' tail'
+    }
+    expect(await parseOAuthClientFromChunks(chunks())).toBeUndefined()
   })
 
   it('分发物含已审计的 Antigravity client 时优先选它（位置配对会选错组）', () => {
@@ -328,12 +368,10 @@ describe('fetchQuotaSnapshot 链路', () => {
       ...file.deps,
       fetchImpl,
       env: {},
-      binaryPaths: ["/home/test/agy.bin"],
-      readFileImpl: async (path: string) => {
-        if (path.endsWith('antigravity-oauth-token')) {
-          return JSON.stringify({ token: { ...validTokenFile, expiry: '2026-10-01T00:00:00Z' } })
-        }
-        return `bin ${CLIENT_ID} ${CLIENT_SECRET}`
+      binaryPaths: ['/home/test/agy.bin'],
+      readFileImpl: async (_path: string) => JSON.stringify({ token: { ...validTokenFile, expiry: '2026-10-01T00:00:00Z' } }),
+      binaryChunkStreamImpl: async function* () {
+        yield `bin ${CLIENT_ID} ${CLIENT_SECRET}`
       },
       now: () => Date.parse('2026-10-16T00:00:00Z'),
     })
@@ -352,9 +390,11 @@ describe('fetchQuotaSnapshot 链路', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('过期且拿不到 OAuth client 元数据时报 refresh-unavailable（不编造 client）', async () => {
+  it('过期且环境变量/分发物都没有时回落到已审计 client 换发（不再报拿不到元数据）', async () => {
     const file = memoryTokenFile({ token: { ...validTokenFile, expiry: '2026-10-01T00:00:00Z' } })
-    const { fetchImpl, calls } = fakeFetch(quotaRoutes())
+    const { fetchImpl, calls } = fakeFetch(quotaRoutes([
+      { match: (url) => url === OAUTH_TOKEN_URL, respond: () => json({ access_token: 'fresh-token', expires_in: 3600 }) },
+    ]))
     const snapshot = await fetchQuotaSnapshot({}, {
       ...file.deps,
       fetchImpl,
@@ -362,9 +402,53 @@ describe('fetchQuotaSnapshot 链路', () => {
       binaryPaths: [],
       now: () => Date.parse('2026-10-16T00:00:00Z'),
     })
-    expect(snapshot.status).toBe('error')
-    expect(snapshot.error?.code).toBe('refresh-unavailable')
-    expect(calls).toHaveLength(0)
+    expect(snapshot.status).toBe('ok')
+    // 换发用的是 auth-core 里已审计的那一对（与设置页登录同一对），不是编造值。
+    const refresh = at(calls, 0)
+    expect(refresh.url).toBe(OAUTH_TOKEN_URL)
+    expect(refresh.body).toContain(`client_id=${ANTIGRAVITY_CLIENT_ID}`)
+    expect(refresh.body).toContain(`client_secret=${ANTIGRAVITY_CLIENT_SECRET}`)
+  })
+
+  it('环境变量里的 client 优先于分发物', async () => {
+    const file = memoryTokenFile({ token: { ...validTokenFile, expiry: '2026-10-01T00:00:00Z' } })
+    const otherId = ['9876543210', '-zzzzzz.apps.googleusercontent.com'].join('')
+    const otherSecret = ['GOCSPX-', 'ZzYyXxWwVvUuTtSsRrQqPpOoNn01'].join('')
+    const { fetchImpl, calls } = fakeFetch(quotaRoutes([
+      { match: (url) => url === OAUTH_TOKEN_URL, respond: () => json({ access_token: 'fresh-token', expires_in: 3600 }) },
+    ]))
+    const snapshot = await fetchQuotaSnapshot({}, {
+      ...file.deps,
+      fetchImpl,
+      env: { AGY_OAUTH_CLIENT_ID: CLIENT_ID, AGY_OAUTH_CLIENT_SECRET: CLIENT_SECRET },
+      binaryPaths: ['/bin/agy'],
+      binaryChunkStreamImpl: async function* () { yield `bin ${otherId} ${otherSecret}` },
+      now: () => Date.parse('2026-10-16T00:00:00Z'),
+    })
+    expect(snapshot.status).toBe('ok')
+    expect(at(calls, 0).body).toContain(`client_id=${CLIENT_ID}`)
+    expect(at(calls, 0).body).not.toContain(otherId)
+  })
+
+  it('已审计 client 换发被拒（401/400）时给出可行动提示', async () => {
+    // Google 对 invalid_client / invalid_grant 可能回 400，不能只看 401/403。
+    for (const status of [401, 400]) {
+      const file = memoryTokenFile({ token: { ...validTokenFile, expiry: '2026-10-01T00:00:00Z' } })
+      const { fetchImpl } = fakeFetch([
+        { match: (url) => url === OAUTH_TOKEN_URL, respond: () => new Response('denied', { status }) },
+      ])
+      const snapshot = await fetchQuotaSnapshot({}, {
+        ...file.deps,
+        fetchImpl,
+        env: {},
+        binaryPaths: [],
+        now: () => Date.parse('2026-10-16T00:00:00Z'),
+      })
+      expect(snapshot.status).toBe('error')
+      expect(snapshot.error?.code).toBe('refresh-failed')
+      expect(snapshot.error?.message).toContain('已审计 client')
+      expect(snapshot.error?.message).toContain('AGY_OAUTH_CLIENT_ID/SECRET')
+    }
   })
 
   it('401 后换发重试一次仍失败则折叠为错误', async () => {

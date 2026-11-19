@@ -121,11 +121,11 @@ ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因�
 
 这意味着插件**可能读写本机认证材料**，不是“完全不碰凭据”。CLI 源文件不由插件改写；有可用登录态时跳过浏览器授权。没有可用登录态且本次允许交互时才退回官方 OAuth。非交互目录刷新不会暗中弹登录页。CLI 登录不会由 ACP 登录反向补齐。
 
-凭据文件使用临时文件与重命名写入，POSIX 请求 `0600`；Windows 依赖目录 ACL，不宣称文件加密或仅靠 mode 就完成隔离。OAuth client 元数据来自显式环境变量或本机官方分发物，这是兼容性取数路径，不保证官方内部格式永远稳定。
+凭据文件使用临时文件与重命名写入，POSIX 请求 `0600`；Windows 依赖目录 ACL，不宣称文件加密或仅靠 mode 就完成隔离。OAuth client 元数据依次取显式环境变量、本机官方分发物（按块扫描，1.5.x 的 714MB 级分发物不会撞 V8 单字符串上限）、`@cortexkit/antigravity-auth-core` 里已审计的 Antigravity client（与设置页登录同一对）；这是兼容性取数路径，不保证官方内部格式永远稳定。
 
 ### 多账号
 
-账号列表持久化在 `~/.antigravity-acp-accounts/accounts.json`（`AGY_ACP_ACCOUNTS_DIR` 可覆盖）。第一位是**系统账号**：使用真实 HOME，只读导入本机官方 CLI 登录态，不能被删除，也不提供面板 OAuth 重新登录。其余是**隔离账号**：每个账号一张 HOME，`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `.gemini/antigravity-acp/` 都写在里面。
+账号列表持久化在 `~/.antigravity-acp-accounts/accounts.json`（`AGY_ACP_ACCOUNTS_DIR` 可覆盖）。第一位是**系统账号**：使用真实 HOME，只读导入本机官方 CLI 登录态，不能被删除，也不提供面板 OAuth 重新登录。其余是**隔离账号**：每个账号一张 HOME，`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `.gemini/antigravity-acp/` 都写在里面。账号隔离只覆盖 HOME：**安装根（缓存里的官方二进制）仍是用户级目录**，额度取数扫描 client 元数据时不会跟着账号 HOME 跑。
 
 面板的 `添加账号` / `登录` 直接跑 Google OAuth：PKCE、本机 `127.0.0.1:51121/oauth-callback`、state 校验、5 分钟超时；回调后换 token、读 userinfo（邮箱）、写两份登录态文件，不要求本机先有官方二进制或 CLI。登录期间 Host 只返回授权 URL 与阶段，不返回 code、token 或文件路径；取消会关闭监听并清理暂存目录。
 
