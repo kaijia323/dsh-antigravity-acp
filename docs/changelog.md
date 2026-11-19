@@ -4,6 +4,14 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.2 · 2026-11-19（kaijia323 fork）
+
+- **修复：换 worker / 映射被删导致的「没有可用的会话映射」永久判死**。连接池把同一对话换到另一个 worker、空闲回收、标题请求占用空闲槽都属正常行为，但 `SessionMapStore.claim()` 在 owner 变化时会**删除磁盘条目**，随后 `session/resume` 拿不到映射 → 报 `AGY_SESSION_UNRECOVERABLE`，且因为不重放历史，该对话永久失效。真机证据：2026-11-19 16:51（`09723820`，空闲 22 分钟）与 17:18/17:22（`eb012b6b`，空闲 32 分钟），`sessions.json` 里两条映射在失败瞬间被删。现在接管只换 owner、**保留条目**，旧 worker 下次处理该会话时只丢内存记录、不改磁盘。
+- **修复：失败路径不再删除恢复映射**。`#resumeSession` 校验失败、MCP 桥被其他对话接管、异常终止、链接回收、prompt 构造失败都改为「丢内存 + 保留映射」，下一轮仍可 `session/resume`。仍会删除映射的只剩两处刻意场景：prompt 在途失效（`#advanceSession(settled=false)`，本轮历史尚未落定）与宿主删除 DSH 会话（`releaseConversation`，改为无条件 `purge`，重启后也能删）。会话迁移到其他 worker 时关闭本进程副本（配合已验证的「`session/close` 后可 resume」），避免两个进程同时持有同一 ACP 会话。
+- **改进：模型/思考强度变化不再重建会话**。既有 ACP 会话直接 `session/set_config_option` 应用新模型与档位（复用路径新增这一调用）；`session/resume` 不再因路由指纹变化拒绝恢复，恢复后把指纹同步为当前值。system 提示与工具目录在会话创建时固定，沿用原会话——恢复映射优先于「指纹完全一致」。
+- **新增单测**：接管不删条目、接管后旧 owner 写入/删除无效、磁盘条目在新 owner 写入前仍在。
+- 验证：`npm run check` 通过（typecheck + 411 项单测 + 构建）。
+
 ## 0.3.2-fork.1 · 2026-11-19（kaijia323 fork）
 
 - **修复：DSH 用户插话（`busyEnter: steer`）会杀死会话**。DSH 在回合中途把用户插话作为真实 user 消息追加在工具结果之后；旧实现把它当成「历史被改写」，`#abandonTurn()` 丢会话后因中途没有磁盘映射直接报 `AGY_SESSION_UNRECOVERABLE`（真机 2026-11-19 15:11 复现：会话 `d7bdbc39` 第 18 步作废）。现在 `ContinuationState` 把「user 角色 + id 从未发出」的尾部消息（宿主通知与用户插话）排除在续轮判定之外，并把可投递内容附到最后一条工具结果交给 agent——插话不再丢失，也不会再判死会话。

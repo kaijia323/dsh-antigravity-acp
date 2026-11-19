@@ -79,16 +79,42 @@ describe('共享 SessionMapStore 所有权与串行提交', () => {
     expect(maximum).toBe(1)
     expect(disk).toEqual({ a: entry(1), b: entry(2) })
   })
-  it('旧 worker 不得覆盖或删除已被接管的键，接管不恢复仍在旧进程里的会话', async () => {
+  it('换 owner 时接管条目而不是删除；旧 worker 不得覆盖或删除已被接管的键', async () => {
     let disk: Record<string, SessionMapEntry> = {}
     const store = new SessionMapStore({ load: async () => ({}), save: rows => { disk = rows } })
     const a = Symbol(), b = Symbol()
     await store.claim('chat', a); store.set('chat', a, entry(1))
-    expect(await store.claim('chat', b)).toBeUndefined()
+    // 连接池换 worker 是正常现象：接管必须返回条目供 session/resume 接回，不能删。
+    expect(await store.claim('chat', b)).toEqual(entry(1))
     store.set('chat', b, entry(3)); store.set('chat', a, entry(1)); store.delete('chat', a)
     await store.claim('other', a); store.set('other', a, entry(2)); await store.flush()
     expect(disk.chat?.sentCount).toBe(3)
     expect(disk.other?.sentCount).toBe(2)
+  })
+
+  it('purge 无条件删除陈旧映射：重启后 owner 表为空也能删掉', async () => {
+    let disk = { chat: entry(1) } as Record<string, SessionMapEntry>
+    const store = new SessionMapStore({ load: async () => disk, save: rows => { disk = rows } })
+    await store.purge('chat')
+    await store.flush()
+    expect(disk.chat).toBeUndefined()
+    // 不存在的键是空操作，不新增条目。
+    await store.purge('missing')
+    await store.flush()
+    expect(disk).toEqual({})
+  })
+
+  it('接管不丢磁盘映射：新 owner 尚未写入前，原条目仍在', async () => {
+    let disk: Record<string, SessionMapEntry> = {}
+    const store = new SessionMapStore({ load: async () => ({}), save: rows => { disk = rows } })
+    const a = Symbol(), b = Symbol()
+    await store.claim('chat', a); store.set('chat', a, entry(1)); await store.flush()
+    expect(await store.claim('chat', b)).toEqual(entry(1))
+    await store.flush()
+    expect(disk.chat).toEqual(entry(1))
+    // 旧 owner 已失去所有权：写入与删除都应被忽略。
+    store.delete('chat', a)
+    expect(await store.claim('chat', Symbol())).toEqual(entry(1))
   })
   it('卸载 release 保留磁盘记录，新的 owner 可恢复；坏写入不毒化队列', async () => {
     let disk = { chat: entry(1) } as Record<string, SessionMapEntry>

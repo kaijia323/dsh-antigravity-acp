@@ -89,7 +89,7 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 
 1. 插件通过宿主 `ctx.subprocess` 以 stdio 启动官方 ACP server。
 2. 会话使用厂商扩展 `_meta.antigravity.enabledTools: []` 关闭内置工具，使用 `eagerMcpServers: ["dsh-tools"]` 提供当前 DSH 工具 schema。此扩展的默认适配基准是官方 server 1.4.0，不保证任意版本同样实现。
-3. 私有 MCP 桥仅绑定 `127.0.0.1`，新建带工具的 ACP 会话时轮换 token 与授权代次；同一会话复用时保留授权，目录/归属变化则丢弃该会话（后续回合报 `AGY_SESSION_UNRECOVERABLE`，需新开）。
+3. 私有 MCP 桥仅绑定 `127.0.0.1`，新建带工具的 ACP 会话时轮换 token 与授权代次；同一会话复用时保留授权，桥被其他对话接管或归属变化时关闭本地副本并保留映射，下一轮 `session/resume` 重新注册桥。
 4. ACP 权限提示只对已识别私有桥请求选择 `allow_once`，不会自身产生 DSH 调用；真正的 `tools/call` 到桥后才挂起，并以 `tool-call` 交给 DSH。
 5. DSH 负责校验、审批、执行；工具结果按调用 ID 匹配，携带 `isError` 回填同一 ACP prompt。支持乱序结果与后续批次。
 
@@ -97,7 +97,7 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 
 续轮会校验模型、思考强度、system、工具 schema、历史前缀与上轮实际输出。变更后取消旧 prompt，并让这一轮报 `AGY_SESSION_UNRECOVERABLE`（不按新历史重放）。宿主注入块（`time-context` / `runtime-context` / 目录 / 指令，即 `source.form` 为 `snapshot`/`catalog`/`instructions`/`recall` 的 user 消息）不参与前缀比较，也不阻挡续轮：它们由 pre-step 在请求生成时追加，位置与数量不由模型决定。真实用户消息、压缩检查点与模型选择记录仍按普通历史校验。`finish(tool-calls)` 只封住当前 DSH 输出，不代表官方 prompt 已结束；封口后到达的内容留给续轮。
 
-普通用户回合默认复用 ACP session，校验输入前缀和上一步实际输出，只发增量；编辑回答、外部 provider 的额外输出或路由变化会让这一轮报 `AGY_SESSION_UNRECOVERABLE`（不重放）。选模（`session/set_config_option`）只在**本会话自己**声明过 model 选择器、且当前值已经是目标值时短路：新会话省略 `configOptions` 时不会拿别的会话的 `currentValue` 短路，否则新会话会静默跑在 agent 默认模型上。`resumeSessions` 开启跨进程恢复（默认开启），恢复后校正模型；文本历史信封不等同于模型 API 的原生角色消息。上游 `end_turn` 没有可见文本或工具调用时返回 `AGY_EMPTY_RESPONSE`，仅思考或进度通知不算成功。
+普通用户回合默认复用 ACP session，校验输入前缀和上一步实际输出，只发增量；编辑回答或外部 provider 的额外输出会让这一轮报 `AGY_SESSION_UNRECOVERABLE`（不重放）。模型/思考强度变化就地 `session/set_config_option`，不重建会话；system 与工具目录在会话创建时固定，变化沿用原会话。选模（`session/set_config_option`）只在**本会话自己**声明过 model 选择器、且当前值已经是目标值时短路：新会话省略 `configOptions` 时不会拿别的会话的 `currentValue` 短路，否则新会话会静默跑在 agent 默认模型上。`resumeSessions` 开启跨进程恢复（默认开启），恢复后校正模型；文本历史信封不等同于模型 API 的原生角色消息。上游 `end_turn` 没有可见文本或工具调用时返回 `AGY_EMPTY_RESPONSE`，仅思考或进度通知不算成功。
 
 ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因拒绝次数终止整个对话，模型仍可改用 DSH 工具。已识别私有桥调用的 `kind` 仅用于展示；权限提示参数只供诊断，不因缺失或包装差异阻断，真正执行仍取自后续 `tools/call`。协议能力与权限拒绝**不是操作系统沙箱**，不证明官方二进制只能执行被协议观察到的操作。
 

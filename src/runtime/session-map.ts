@@ -26,7 +26,7 @@ export interface SessionMapEntry {
   sentHash: string
   /** 上一步实际交付的 assistant blocks 指纹；恢复时必须与 DSH 新增历史一致。 */
   outputHash: string
-  /** 路由指纹：模型、思考强度、系统提示与工具目录。 */
+  /** 路由指纹：模型、思考强度、系统提示与工具目录。仅用于诊断；恢复时不再强制一致。 */
   route: string
   /** 最近一次成功发送的时间（毫秒）。 */
   updatedAt: number
@@ -39,8 +39,8 @@ interface SessionMapFile {
 
 /** 映射文件格式版本。 */
 const SESSION_MAP_FORMAT = 2
-/** 会话映射条数上限：不设上限（条目只存 id 与哈希，不存对话内容）。 */
-const MAX_ENTRIES = Number.POSITIVE_INFINITY
+/** 会话映射条数上限：条目只存 id 与哈希，512 条足够长周期使用且避免文件无限增长。 */
+const MAX_ENTRIES = 512
 /** 默认文件名。 */
 const FILE_NAME = 'sessions.json'
 
@@ -161,7 +161,8 @@ export interface SessionMapStorage {
 
 /**
  * 同一插件的所有 worker 共用一个存储：键的所有权与增量更新集中管理，写入串行化。
- * 接管仍被另一 worker 持有的键时不 load 旧 ACP 会话（它仍可能在旧进程内存中）。
+ * 连接池把同一对话换到另一 worker 时，接管只是换 owner 并**保留条目**，交给新 owner
+ * 走 `session/resume` 接回；旧 worker 失去所有权后写入/删除都会被忽略。
  * 每次只更新调用方本轮的键，旧 worker 无法覆盖或删除新 owner 的状态。
  */
 export class SessionMapStore {
@@ -176,14 +177,12 @@ export class SessionMapStore {
   async claim(key: string, owner: symbol): Promise<SessionMapEntry | undefined> {
     this.#ready ??= this.storage.load().then(entries => { this.#entries = { ...entries } }, () => { this.#reportError() })
     await this.#ready
-    const previous = this.#owners.get(key)
-    const entry = previous === undefined || previous === owner ? this.#entries[key] : undefined
+    // 换 worker 是连接池的正常行为（并发、空闲回收、标题请求都会换），不能因此
+    // 删掉唯一的恢复映射：条目交给新 owner 走 session/resume 接回。旧 worker 下次
+    // 处理该会话时 owns() 为假，会丢弃自己的内存记录但不再删磁盘条目。
+    const entry = this.#entries[key]
     this.#owners.delete(key)
     this.#owners.set(key, owner)
-    if (previous !== undefined && previous !== owner) {
-      delete this.#entries[key]
-      this.#enqueue()
-    }
     while (this.#owners.size > MAX_ENTRIES) {
       const oldest = this.#owners.keys().next().value
       if (oldest === undefined) break
@@ -204,6 +203,18 @@ export class SessionMapStore {
 
   delete(key: string, owner: symbol): void {
     if (!this.owns(key, owner)) return
+    delete this.#entries[key]
+    this.#enqueue()
+  }
+
+  /**
+   * 无条件删除（不要求所有权）。仅供「宿主已删除该 DSH 会话」这类确定失效的场景：
+   * 重启后 `#owners` 为空或所有权已转移时，普通 delete 会静默失效并留下陈旧映射。
+   */
+  async purge(key: string): Promise<void> {
+    this.#ready ??= this.storage.load().then(entries => { this.#entries = { ...entries } }, () => { this.#reportError() })
+    await this.#ready
+    if (!(key in this.#entries)) return
     delete this.#entries[key]
     this.#enqueue()
   }

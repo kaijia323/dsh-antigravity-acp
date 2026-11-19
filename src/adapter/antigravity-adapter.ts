@@ -4,9 +4,10 @@
  * 形态：官方 ACP server（Gemini 主模型）走 stdio，工具留在 DSH 侧，经插件
  * 进程内的私有 loopback MCP 桥暴露给 agent（见 ../bridge/mcp-bridge.ts）。
  *
- * DSH 是历史权威：只有输入前缀、上轮实际交付输出与路由一致才复用会话；
- * 不一致时完整重建。工具结果在同一个 ACP prompt 内经 MCP 回填。
- * 可选磁盘映射只保存 ID、计数与指纹，不存消息正文。
+ * DSH 是历史权威：只有输入前缀与上轮实际交付输出一致才复用会话；失效时丢弃
+ * 内存记录但**保留磁盘映射**，交给 `session/resume` 接回（不重放历史）。模型/思考
+ * 强度变化就地 `session/set_config_option`，不重建会话。工具结果在同一个 ACP prompt
+ * 内经 MCP 回填。可选磁盘映射只保存 ID、计数与指纹，不存消息正文。
  */
 import { LlmAdapter, LlmError, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
@@ -811,7 +812,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
    *
    * 判定「续轮 vs 新轮」：messages 尾部的连续 tool 结果消息与当前回合 park
    * 的 MCP 调用**按顺序一一匹配**且该回合的 ACP prompt 尚未应答 → 续轮；
-   * 否则按新轮重建（放弃旧回合、新建 ACP session、重放完整 messages）。
+   * 否则按新轮处理（放弃旧回合；有历史时走 `session/resume` 接回，不复用即报错，不重放）。
    * 并发防御：主对话与标题/压缩请求可以同时进入同一个 adapter；从首个 await
    * 之前串行化 stream。工具 park 保留回合所有权，辅助请求等待而不是抢占主回合。
    */
@@ -867,7 +868,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
    */
   async #resumeSession(options: GenerateOptions, key: string, entry?: SessionMapEntry): Promise<ReusedSession> {
     const fail = (reason: string): never => {
-      this.#sessionStore?.delete(key, this.#sessionOwner)
+      // 不删映射：校验失败只否定「这一轮能否续上」，不代表 ACP 会话已失效。
+      // 保留条目让后续轮次（或换回正确历史后）仍能尝试 session/resume。
       throw new LlmError(
         `无法接上原 ACP 会话（${reason}）。已禁用回退重放：请新开一个会话，或恢复该映射后再试。`,
         AGY_ADAPTER_ERROR.SESSION_UNRECOVERABLE,
@@ -876,7 +878,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     if (!this.#resumeSessions) return fail('resumeSessions 未开启')
     if (!entry) return fail('没有可用的会话映射')
     if (entry.cwd !== this.#cwd) return fail('会话工作目录与当前不一致')
-    if (entry.route !== this.#sessionRouteFingerprint(options)) return fail('模型、系统提示或工具目录已变化')
+    // 路由（模型/档位/系统提示/工具目录）变化不再判死：resume 之后会
+    // #applyModelSelection 应用当前模型与档位；system 与工具目录在会话创建时固定。
     if (options.messages.length <= entry.sentCount) return fail('没有新增消息')
     if (!prefixMatches(options.messages, entry.sentCount, entry.sentHash)) return fail('历史不是已发送前缀的追加')
     if (!outputMatches(options.messages.slice(entry.sentCount), entry.outputHash)) return fail('上一轮输出已变化或来自其他会话')
@@ -935,7 +938,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       sentCount: entry.sentCount,
       sentHash: entry.sentHash,
       outputHash: entry.outputHash,
-      route: entry.route,
+      // 恢复后模型/档位已按当前路由应用，指纹同步到当前值，避免下一轮误判变化。
+      route: this.#sessionRouteFingerprint(options),
       usesTools: tools.length > 0,
     }
     this.#sessions.set(key, record)
@@ -953,37 +957,35 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     const key = `${dshSessionId}::chat`
     const record = this.#sessions.get(key)
     if (record) {
-      this.#dropSession(record, 'DSH 会话已销毁')
+      this.#dropSession(record, 'DSH 会话已销毁', true)
       return
     }
-    // 内存里没有记录（进程重启过）也要删掉磁盘映射，否则下次 resume 会接回一个已删会话。
-    this.#sessionStore?.delete(key, this.#sessionOwner)
+    // 内存里没有记录（进程重启过）也要删掉磁盘映射，否则下次 resume 会接回一个已删会话：
+    // 重启后 store 的 owner 表为空，普通 delete 会静默失效，这里必须无条件删除。
+    void this.#sessionStore?.purge(key)
   }
 
-  /** 找到可复用的会话；记录失效时顺手丢弃（关闭对端会话，下一轮只能报错）。 */
+  /**
+   * 找到可复用的会话。任何失效都只**丢弃内存记录并保留磁盘映射**，交给
+   * `session/resume` 接回；模型/档位变化不丢弃会话，由 `#runNewRound` 直接应用到
+   * 既有 ACP 会话（`session/set_config_option`）。
+   */
   #findReusableSession(options: GenerateOptions, key: string): ReusedSession | undefined {
     const record = this.#sessions.get(key)
     if (!record) return undefined
     if (this.#resumeSessions && this.#sessionStore && !this.#sessionStore.owns(key, this.#sessionOwner)) {
+      // 会话已被连接池换到另一个 worker：关闭本进程的副本（已验证 close 后仍可 resume），
+      // 映射保留给新 owner；否则两个进程会同时持有同一条 ACP 会话。
       this.#dropSession(record, '会话已迁移到其他 worker')
       return undefined
     }
     // 进程没了：只丢掉内存记录，**保留磁盘映射**，交给 resume 接回原会话。
     if (record.link.closed) {
-      this.#sessions.delete(record.key)
-      this.#sessionModelValues.delete(record.sessionId)
-      this.#sessionModelDeclared.delete(record.sessionId)
-      this.#sessionThoughtValues.delete(record.sessionId)
-      this.#systemViaMeta.delete(record.sessionId)
-      this.#log?.info('antigravity-acp: ACP 链接已关闭，保留恢复映射，下一轮按 session/resume 接回')
-      return undefined
-    }
-    if (record.route !== this.#sessionRouteFingerprint(options)) {
-      this.#dropSession(record, '模型、系统提示或工具目录已变化')
+      this.#forgetSession(record, 'ACP 链接已关闭')
       return undefined
     }
     // 用过工具的会话依赖桥的授权代次：桥被另一个对话接管后它的 MCP 连接
-    // 持有旧 token，沿用只会让工具调用被拒；直接重建。
+    // 持有旧 token，沿用只会让工具调用被拒；关掉对端会话后交给 resume 重新注册桥。
     if (record.usesTools && this.#bridge.owner !== record.key) {
       this.#dropSession(record, 'MCP 桥已被其他对话接管')
       return undefined
@@ -1085,16 +1087,34 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
   }
 
-  /** 丢弃会话记录并关闭对端会话；失败忽略——记录本来就已经不可信。 */
-  #dropSession(record: ReusedSession, reason: string): void {
+  /**
+   * 只丢弃内存记录，**保留磁盘映射**，也不关闭对端会话：会话本身没有被否定，
+   * 下一条请求会走 `session/resume` 接回（典型场景：会话被连接池换到另一个 worker）。
+   */
+  #forgetSession(record: ReusedSession, reason: string): void {
     if (this.#sessions.get(record.key) !== record) return
     this.#sessions.delete(record.key)
-    this.#sessionStore?.delete(record.key, this.#sessionOwner)
     this.#sessionModelValues.delete(record.sessionId)
     this.#sessionModelDeclared.delete(record.sessionId)
     this.#sessionThoughtValues.delete(record.sessionId)
     this.#systemViaMeta.delete(record.sessionId)
-    this.#log?.info(`antigravity-acp: 放弃 ACP 会话复用（${reason}）`)
+    this.#log?.info(`antigravity-acp: 放弃内存复用，保留恢复映射（${reason}）`)
+  }
+
+  /**
+   * 丢弃内存记录并关闭对端会话（`session/close` 之后仍可被 `session/resume` 接回）。
+   * 默认**保留磁盘映射**：一次失败不等于会话失效，下一轮还能恢复；只有宿主删除
+   * 该 DSH 会话（`releaseConversation`）时才显式删除映射。
+   */
+  #dropSession(record: ReusedSession, reason: string, dropMapping = false): void {
+    if (this.#sessions.get(record.key) !== record) return
+    this.#sessions.delete(record.key)
+    if (dropMapping) this.#sessionStore?.delete(record.key, this.#sessionOwner)
+    this.#sessionModelValues.delete(record.sessionId)
+    this.#sessionModelDeclared.delete(record.sessionId)
+    this.#sessionThoughtValues.delete(record.sessionId)
+    this.#systemViaMeta.delete(record.sessionId)
+    this.#log?.info(`antigravity-acp: 放弃 ACP 会话复用（${reason}；${dropMapping ? '删除映射' : '保留映射'}）`)
     this.#closeSession(record.link, record.sessionId)
   }
 
@@ -1111,8 +1131,9 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   }
 
   /**
-   * 卸载时关闭所有对端会话，但**保留**磁盘映射：那正是下次启动 `session/resume`
-   * 接回的依据（接不上就报错，不重放）。真正失效的会话在 #dropSession 里连同映射一起删掉。
+   * 卸载 / 空闲回收时关闭所有对端会话，但**保留**磁盘映射：那正是下次`session/resume`
+   * 接回的依据（接不上就报错，不重放）。除宿主删除会话（releaseConversation）外，
+   * 插件不再主动删除映射。
    */
   #dropAllSessions(reason: string, link?: AgentLink): void {
     for (const record of [...this.#sessions.values()]) {
@@ -1435,6 +1456,13 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       // 复用：同一 ACP 会话已有原生历史，只发本轮新增消息。
       link = reused.link
       sessionId = reused.sessionId
+      // 模型/档位变化不必重建会话：既有 ACP 会话支持 session/set_config_option。
+      // system 提示与工具目录在会话创建时已固定，沿用原会话（恢复映射比重建更重要）。
+      const route = this.#sessionRouteFingerprint(options)
+      if (reused.route !== route) {
+        await this.#applyModelSelection(reused.link, reused.sessionId, options.model, options.reasoningEffort, options.signal)
+        reused.route = route
+      }
       this.#log?.info(
         `antigravity-acp: 复用 ACP 会话 session=${sessionId} 已发送消息=${reused.sentCount}` +
           ` 本轮新增=${options.messages.length - reused.sentCount}`,
