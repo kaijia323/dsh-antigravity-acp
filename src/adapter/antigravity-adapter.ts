@@ -42,6 +42,7 @@ import type { CachedCatalog, CachedThoughtLevel } from '../runtime/catalog-cache
 import { applyModelSettings, modelDisplayName, modelSettingFor, normalizeModelSettings, resolveModelTarget } from './model-settings.js'
 import type { ModelSetting } from './model-settings.js'
 import { buildPromptDeltaWithImages, buildPromptWithImages, buildToolResultContent } from './image-content.js'
+import { boundedHistory } from './prompt-transcript.js'
 import type { ImageReader } from './image-content.js'
 import { AGY_TURN_ERROR, PromptTurn } from './prompt-turn.js'
 import type { AcpLifecycle } from '../runtime/lifecycle.js'
@@ -145,10 +146,20 @@ export interface AntigravityAcpAdapterOptions {
   cancelGraceMs?: number
   /** 保留进程的最长空闲时间（毫秒），超时回收；0 表示不设上限。 */
   idleRecycleMs?: number
+  /**
+   * 会话接不上时是否允许有界历史重放兜底（默认 true）。
+   *
+   * 不开就一直报 `AGY_SESSION_UNRECOVERABLE`（旧行为）；开启后用
+   * `boundedHistory()` 把最近若干消息重放给新建 ACP 会话，对话可以继续，
+   * 代价是更早的历史对模型不可见、且会消耗一次输入 token。
+   */
+  replayFallback?: boolean
+  /** 重放兜底的历史预算（字符数，默认 120000）。 */
+  replayMaxChars?: number
   /** 所有 worker 共享的映射存储（含键所有权与串行提交）。 */
   sessionStore?: SessionMapStore
   /** Capture live preferences only between ACP turns, never during tool continuation. */
-  readSettings?: () => Pick<AntigravityAcpAdapterOptions, 'modelOverrides' | 'resumeSessions' | 'cancelGraceMs' | 'idleRecycleMs' | 'sessionStore'>
+  readSettings?: () => Pick<AntigravityAcpAdapterOptions, 'modelOverrides' | 'resumeSessions' | 'cancelGraceMs' | 'idleRecycleMs' | 'sessionStore' | 'replayFallback' | 'replayMaxChars'>
   /** 独立 adapter 的兼容读取回调；连接池必须改用共享 sessionStore。 */
   loadSessionMap?: () => Promise<Record<string, SessionMapEntry>>
   /** 保存 ACP 会话映射；失败由实现方吞掉。 */
@@ -220,6 +231,8 @@ interface ReusedSession {
  * 真正需要重试语义时，应针对单类失败单独引入可证明幂等的路径，而不是整步重放。
  */
 
+/** 有界历史重放兜底的默认字符预算。 */
+const DEFAULT_REPLAY_MAX_CHARS = 120_000
 const DEFAULT_PROMPT_TIMEOUT_MS = 30 * 60_000
 const DEFAULT_SESSION_TIMEOUT_MS = 120_000
 const DEFAULT_PARK_SETTLE_MS = 50
@@ -258,6 +271,10 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   #suppressUpdates = 0
   #cancelGraceMs: number
   #idleRecycleMs: number
+  /** 会话接不上时是否允许有界历史重放兜底。 */
+  #replayFallback: boolean
+  /** 重放兜底的历史预算（字符数）。 */
+  #replayMaxChars: number
   /** 取消后的确认定时器；agent 先确认停止就取消回收。 */
   #cancelGrace: { timer: ReturnType<typeof setTimeout>; link: AgentLink; turn: PromptTurn; pending: Promise<void>; resolve(): void } | undefined
   /** 保留进程的空闲回收定时器；有新回合就撤销。 */
@@ -369,6 +386,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       : undefined)
     this.#cancelGraceMs = Math.max(0, options.cancelGraceMs ?? 30_000)
     this.#idleRecycleMs = Math.max(0, options.idleRecycleMs ?? 0)
+    this.#replayFallback = options.replayFallback ?? true
+    this.#replayMaxChars = Math.max(1_000, options.replayMaxChars ?? DEFAULT_REPLAY_MAX_CHARS)
     this.#readImage = options.readImage
     this.#canReadImages = options.canReadImages
     this.#bridge = new McpToolBridge({
@@ -491,6 +510,8 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     this.#resumeSessions = settings.resumeSessions ?? true
     this.#cancelGraceMs = Math.max(0, settings.cancelGraceMs ?? 30_000)
     this.#idleRecycleMs = Math.max(0, settings.idleRecycleMs ?? 0)
+    this.#replayFallback = settings.replayFallback ?? true
+    this.#replayMaxChars = Math.max(1_000, settings.replayMaxChars ?? DEFAULT_REPLAY_MAX_CHARS)
     if (this.#sessionStore !== settings.sessionStore) this.#sessionStore?.release(this.#sessionOwner)
     this.#sessionStore = settings.sessionStore
   }
@@ -1440,6 +1461,10 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     // 还会被上游按体积截断。一次性请求（标题/压缩）自带完整输入，不走这条路径。
     const hasPriorHistory = options.purpose === undefined
       && options.messages.some((message) => message.role === 'assistant' || message.role === 'tool')
+    // 会话接不上时的兜底：默认不再让整段对话永久失效，而是用有界历史重放
+    // 新建一个 ACP 会话（只放得下最近 messages，更早的省略）。关闭 replayFallback
+    // 则保持旧行为：直接报 AGY_SESSION_UNRECOVERABLE。
+    let replay = false
     if (!reused && hasPriorHistory) {
       if (key === undefined) {
         throw new LlmError(
@@ -1447,7 +1472,16 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           AGY_ADAPTER_ERROR.SESSION_UNRECOVERABLE,
         )
       }
-      reused = await this.#resumeSession(options, key, entry)
+      try {
+        reused = await this.#resumeSession(options, key, entry)
+      } catch (error) {
+        const code = (error as { code?: unknown }).code
+        if (!this.#replayFallback || code !== AGY_ADAPTER_ERROR.SESSION_UNRECOVERABLE) throw error
+        replay = true
+        this.#log?.warn(
+          `antigravity-acp: 原 ACP 会话无法接上，按有界历史重放新建会话（${(error as { message?: string }).message ?? String(error)}）`,
+        )
+      }
     }
     const tools = options.tools ?? []
     let link: AgentLink
@@ -1567,9 +1601,10 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     try {
       // system 已经通过 session/new 的 meta 交给 agent 时，prompt 里不再重复包装。
       const systemBlock = this.#systemViaMeta.has(sessionId) ? undefined : options.system
+      const promptMessages = replay ? boundedHistory(options.messages, this.#replayMaxChars) : options.messages
       content = reused
         ? await buildPromptDeltaWithImages(incrementalMessages(options.messages, reused.sentCount), this.#imageOptions(options.signal))
-        : await buildPromptWithImages(systemBlock, options.messages, tools, this.#imageOptions(options.signal))
+        : await buildPromptWithImages(systemBlock, promptMessages, tools, this.#imageOptions(options.signal))
     } catch (error) {
       // prompt 还没发出去就失败（图片不可用 / 被取消 / 内容不支持）：刚建立的
       // ACP 会话与磁盘 claim 必须当场回收，不能只靠空闲回收兜底。

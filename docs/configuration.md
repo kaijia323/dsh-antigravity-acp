@@ -42,7 +42,7 @@ ACP 官方 agent 在同一会话内会保留上下文（2026-10-23 真机验证�
 - 同一 DSH 对话的**普通聊天回合**校验输入前缀与上轮实际交付输出后，只发送新增消息；system、工具策略与历史不再每轮重放。收到 `finish` 即结束消费也会提交游标。
 - 注入内容按 producer 与内容去重：仅省略相同的快照/目录/指令或已见召回材料；首次出现、变化或恢复旧版本的状态仍发送。真实用户消息、notice、relay 与未知类别不去重。
 - **模型或思考强度变化不再重建会话**：既有 ACP 会话直接 `session/set_config_option` 应用新值。system 与工具目录在会话创建时固定，变化时沿用原会话（恢复映射优先于指纹完全一致）。
-- 输入无法接上时（历史不是已发送前缀的追加、上轮输出变化、跨进程映射缺失等）**报 `AGY_SESSION_UNRECOVERABLE`，不重放历史**；映射本身保留，后续轮次仍会尝试 `session/resume`，恢复手段也可新开会话。
+- 输入无法接上时：先尝试 `session/resume`；失败则按 `replayFallback`（默认开启）用**最近若干消息**（`replayMaxChars`，默认 120000 字符）新建 ACP 会话继续，日志写明「按有界历史重放新建会话」。关闭 `replayFallback` 才退回旧行为（报 `AGY_SESSION_UNRECOVERABLE`、不重放）。
 - **换 worker / 空闲回收不丢会话**：连接池把同一对话换到另一 worker 时，旧 worker 关闭本地副本、映射交给新 owner 走 `session/resume`（`session/close` 后可恢复已验证）。
 - 宿主注入块不算「历史不是前缀的追加」：`time-context`（`refreshIntervalMs` 默认 600s）、`runtime-context`、技能目录与工作区指令可以在任意两条真实消息之间出现，续轮与前缀校验都会剔除它们；落在工具结果之后的注入块也不会让续轮判定落空。
 - 工具续轮期间还会出现两类真实 user 消息：宿主通知（`tool-jobs`、`subagent-settled` 等）与用户在忙时的插话（`busyEnter: steer`）。它们同样按「user 角色 + id 未曾发出」识别，不参与前缀比较；其中一次性通知与插话会附到最后一条工具结果投递给 agent，快照/目录/指令/召回类大块上下文跳过（后续回合仍可重新出现）。真正插在历史中间的 user 消息仍视为篡改并报错。

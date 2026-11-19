@@ -81,6 +81,13 @@ export interface AntigravityHostConfig {
   /** 保留进程的最长空闲时间（毫秒），超时回收；0 表示不设上限。 */
   idleRecycleMs?: number
   /**
+   * 会话接不上时是否允许有界历史重放兜底（默认 true）：用最近若干消息
+   * 新建 ACP 会话继续对话。关闭则保持旧行为（直接报 AGY_SESSION_UNRECOVERABLE）。
+   */
+  replayFallback?: boolean
+  /** 重放兜底的历史预算（字符数，默认 120000）。 */
+  replayMaxChars?: number
+  /**
    * 是否允许额度取数调用本机官方 agy CLI（默认关闭）。
    * 关闭时不 spawn agy：套餐额度走 Cloud Code Assist HTTP（读该账号 HOME 下
    * 的 CLI 登录态），AI Credits 不查询。
@@ -92,7 +99,7 @@ export interface AntigravityHostConfig {
 
 // Only fields owned by the custom settings card are live. Ordinary launch/pool
 // configuration remains ordinary, so editing it still follows the host lifecycle.
-export const LIVE_SETTING_KEYS = ['agentMode', 'modelOverrides', 'proxyUrl', 'proxyBypass', 'agyCliPath', 'resumeSessions', 'cancelGraceMs', 'idleRecycleMs', 'cliQuotaEnabled'] as const
+export const LIVE_SETTING_KEYS = ['agentMode', 'modelOverrides', 'proxyUrl', 'proxyBypass', 'agyCliPath', 'resumeSessions', 'replayFallback', 'replayMaxChars', 'cancelGraceMs', 'idleRecycleMs', 'cliQuotaEnabled'] as const
 export type LiveSettingKey = typeof LIVE_SETTING_KEYS[number]
 export type AntigravityPluginConfig = Omit<AntigravityHostConfig, LiveSettingKey> & {
   [K in LiveSettingKey]?: AntigravityHostConfig[K] | Volatile<AntigravityHostConfig[K]>
@@ -116,6 +123,8 @@ export function liveHostConfig(config: AntigravityPluginConfig): AntigravityHost
     get agentMode() { return readSetting(config.agentMode) },
     get agyCliPath() { return readSetting(config.agyCliPath) },
     get resumeSessions() { return readSetting(config.resumeSessions) },
+    get replayFallback() { return readSetting(config.replayFallback) },
+    get replayMaxChars() { return readSetting(config.replayMaxChars) },
     get cancelGraceMs() { return readSetting(config.cancelGraceMs) },
     get idleRecycleMs() { return readSetting(config.idleRecycleMs) },
     get cliQuotaEnabled() { return readSetting(config.cliQuotaEnabled) },
@@ -156,7 +165,9 @@ export const Config = Schema.object({
   >,
   proxyUrl: Schema.string().volatile().description('官方进程出网代理，如 http://127.0.0.1:7890（缺 scheme 按 http 处理）。留空继承宿主代理，宿主也未配置时才直连'),
   proxyBypass: Schema.string().volatile().description('代理排除列表，逗号分隔，如 example.internal,*.internal；不支持 CIDR。localhost/127.0.0.1/::1 始终自动排除'),
-  resumeSessions: Schema.boolean().default(true).volatile().description('重启后用 session/resume 接上原 ACP 会话（唯一延续路径）；关掉它等于禁止历史会话跨进程继续。接不上时报 AGY_SESSION_UNRECOVERABLE，不重放历史'),
+  resumeSessions: Schema.boolean().default(true).volatile().description('重启后用 session/resume 接上原 ACP 会话（唯一延续路径）；关掉它等于禁止历史会话跨进程继续。接不上时按 replayFallback 决定重放兜底或报错'),
+  replayFallback: Schema.boolean().default(true).volatile().description('会话无法接上时用最近历史重放新建 ACP 会话，避免对话永久失效；关闭则直接报 AGY_SESSION_UNRECOVERABLE'),
+  replayMaxChars: Schema.natural().min(1_000).max(2_000_000).default(120_000).volatile().description('重放兜底的历史预算（字符数）'),
   cancelGraceMs: Schema.natural().max(60_000).default(30_000).volatile().description('取消后等待 agent 确认停止的上限（毫秒）；0 表示不等待、立即回收'),
   idleRecycleMs: Schema.natural().max(3_600_000).default(900_000).volatile().description('空闲 worker 保留多久（毫秒）；默认 15 分钟后回收进程，下次进入该对话用 session/resume 接回（已验证不重放历史）。0 表示不回收'),
   cliQuotaEnabled: Schema.boolean().default(false).volatile().description('允许额度取数调用本机 agy CLI（默认关闭）。关闭时不启动 agy，套餐额度走内置直连，AI Credits 不查询。开启后运行 agy -p /usage 与 agy -p /credits；未找到 CLI 时套餐额度回落直连'),

@@ -83,6 +83,29 @@ export const CURRENT_REQUEST_NOTICE_TEXT = [
   '请直接回应它；只有它明确要求继续时，才续做历史里未完成的工作。',
 ].join('\n')
 
+/**
+ * 有界历史重放：会话接不上时，为新建 ACP 会话挑选能放下的最近历史。
+ *
+ * 从最新往回累加编码后的字符数，超过 `maxChars` 立即停止（更早的历史整体省略）；
+ * 至少保留最后一条消息，避免重放内容为空。返回的数组保持原时间顺序。
+ * 只用于「无回退重放就永久报错」的场景，不改变正常增量续轮路径。
+ */
+export function boundedHistory(messages: readonly RequestMessage[], maxChars: number): RequestMessage[] {
+  if (messages.length === 0) return []
+  const budget = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 0
+  const kept: RequestMessage[] = []
+  let used = 0
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!message) continue
+    const size = encodeMessage(message).length
+    if (kept.length > 0 && used + size > budget) break
+    kept.push(message)
+    used += size
+  }
+  return kept.reverse()
+}
+
 /** 解析出的单条消息信封。 */
 export interface TranscriptEntry {
   /** DSH 消息角色。 */

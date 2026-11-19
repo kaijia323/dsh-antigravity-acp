@@ -114,6 +114,37 @@ describe.skipIf(!ENABLED)('会话映射在 worker 切换 / 空闲回收 / 路由
     }
   }, 900_000)
 
+  it('历史被改写（编辑/压缩类）时按有界历史重放继续，不报不可恢复', async () => {
+    const dir = await cacheDir()
+    const base: GenerateOptions = {
+      provider: 'antigravity-acp', model: MODEL, reasoningEffort: 'low' as never, sessionId: sid('session-replay-fallback'), messages: [],
+    }
+    const adapter = await createRealAdapter({
+      cwd: '/tmp', cacheDir: dir, parkSettleMs: 400, promptTimeoutMs: 180_000,
+      replayFallback: true, replayMaxChars: 8_000,
+    })
+    try {
+      await adapter.adapter.prepareCall('antigravity-acp', MODEL)
+      const opening = userTurn('只回两个字：收到')
+      const r1 = await drain(adapter.adapter.stream({ ...base, messages: [opening] }))
+      expect(failCode(r1)).toBe('')
+      const history: RequestMessage[] = [opening, ...assistantTurn(r1.blocks, MODEL)]
+      // 改写第一条用户消息（等同编辑/压缩后历史不再是已发送前缀的追加）。
+      const rewritten = userTurn('只回两个字：收到（这条被改写过）')
+      const r2 = await drain(adapter.adapter.stream({
+        ...base,
+        messages: [rewritten, ...history.slice(1), userTurn('继续：只回一个字 好')],
+      }))
+      const logs = adapter.logs.map((line) => line.message).join('\n')
+      console.log('[重放兜底] finish =', JSON.stringify(r2.finish), '| error =', r2.error ?? '-')
+      console.log('[重放兜底] 日志:\n' + logs.split('\n').filter((line) => /恢复|复用|放弃|失败|重放/.test(line)).join('\n'))
+      expect(failCode(r2)).not.toContain('AGY_SESSION_UNRECOVERABLE')
+      expect(logs).toContain('有界历史重放')
+    } finally {
+      await adapter.dispose()
+    }
+  }, 900_000)
+
   it('同一会话中途改变思考强度：就地切换，不重建也不报不可恢复', async () => {
     const dir = await cacheDir()
     const base: GenerateOptions = {

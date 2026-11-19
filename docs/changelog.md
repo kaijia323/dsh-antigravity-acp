@@ -4,6 +4,13 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.3 · 2026-11-19（kaijia323 fork）
+
+- **新增：有界历史重放兜底（`replayFallback`，默认开启）**。旧行为是会话接不上一律报 `AGY_SESSION_UNRECOVERABLE` 永久失效；现在先照常尝试 `session/resume`，失败（历史被改写、取消/停止后游标失效、映射缺失等）才用 `boundedHistory()` 取**最近若干消息**（默认上限 120000 字符）新建 ACP 会话继续对话，并在日志里写明「按有界历史重放新建会话」。`replayFallback: false` 可恢复旧行为；`replayMaxChars` 调整预算。
+- 真机复现（2026-11-19 19:18 会话 `fc799239`）：用户点「停止」中断一轮后，下一轮直接报「没有可用的会话映射」并永久失效。重放兜底后，同类场景会在下一轮自动重建会话继续。
+- 真机 E2E（19:22，真实 agy ACP 账号，隔离 HOME）：改写历史触发 resume 失败 → 日志「原 ACP 会话无法接上，按有界历史重放新建会话」→ 该轮 `finish=stop` 正常完成；换 worker / 空闲回收 / 中途改档位三例同时回归通过。
+- 说明：取消/停止仍会删除在途游标（本轮历史未落定），这是刻意保留的；区别是下一轮不再永久报错，而是重放恢复。
+
 ## 0.3.2-fork.2 · 2026-11-19（kaijia323 fork）
 
 - **修复：换 worker / 映射被删导致的「没有可用的会话映射」永久判死**。连接池把同一对话换到另一个 worker、空闲回收、标题请求占用空闲槽都属正常行为，但 `SessionMapStore.claim()` 在 owner 变化时会**删除磁盘条目**，随后 `session/resume` 拿不到映射 → 报 `AGY_SESSION_UNRECOVERABLE`，且因为不重放历史，该对话永久失效。真机证据：2026-11-19 16:51（`09723820`，空闲 22 分钟）与 17:18/17:22（`eb012b6b`，空闲 32 分钟），`sessions.json` 里两条映射在失败瞬间被删。现在接管只换 owner、**保留条目**，旧 worker 下次处理该会话时只丢内存记录、不改磁盘。

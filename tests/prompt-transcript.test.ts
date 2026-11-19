@@ -11,6 +11,7 @@ import type { RequestMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@agentclientprotocol/sdk'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
+  boundedHistory,
   buildPromptContent,
   currentRequestBlock,
   hasPriorConversation,
@@ -137,5 +138,27 @@ describe('取不到用户请求的情形', () => {
     const current = currentRequestBlock([imageMessage])
     expect(current?.type).toBe('text')
     expect(current?.type === 'text' ? current.text : '').toContain('附带图片')
+  })
+
+  it('有界历史重放：保留最近消息、按预算截断且保序、至少留最后一条', () => {
+    const messages: RequestMessage[] = [
+      user('旧消息 1'),
+      createAssistantMessage({ content: [{ type: 'text', text: '旧回复 1' }], source: { provider: 'antigravity-acp', model: 'gemini-4-neon' } }),
+      user('旧消息 2'),
+      createAssistantMessage({ content: [{ type: 'text', text: '旧回复 2' }], source: { provider: 'antigravity-acp', model: 'gemini-4-neon' } }),
+      user('最新问题'),
+    ]
+    // 预算充足：全部保留且顺序不变。
+    expect(boundedHistory(messages, 1_000_000).map((m) => m.role)).toEqual(messages.map((m) => m.role))
+    // 预算很小：至少保留最后一条（最新用户请求），更早的整条省略。
+    const tiny = boundedHistory(messages, 10)
+    expect(tiny.length).toBeGreaterThanOrEqual(1)
+    expect(tiny[tiny.length - 1]).toBe(messages[messages.length - 1])
+    // 中等预算：保留的必须是原历史的连续尾部（不做空洞裁剪、不打乱顺序）。
+    const medium = boundedHistory(messages, 300)
+    expect(medium.length).toBeGreaterThanOrEqual(1)
+    expect(medium).toEqual(messages.slice(messages.length - medium.length))
+    // 空输入直接返回空。
+    expect(boundedHistory([], 100)).toEqual([])
   })
 })

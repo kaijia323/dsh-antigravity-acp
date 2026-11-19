@@ -675,6 +675,8 @@ export function apply(ctx: Context, input: AntigravityPluginConfig): void {
       modelOverrides: config.modelOverrides,
       readSettings: () => ({ ...config, sessionStore: config.resumeSessions ? sessionStore : undefined }),
       resumeSessions: config.resumeSessions,
+      replayFallback: config.replayFallback,
+      replayMaxChars: config.replayMaxChars,
       cancelGraceMs: config.cancelGraceMs,
       idleRecycleMs: config.idleRecycleMs,
       sessionStore: config.resumeSessions ? sessionStore : undefined,

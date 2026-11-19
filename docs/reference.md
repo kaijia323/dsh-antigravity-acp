@@ -97,7 +97,7 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 
 续轮会校验模型、思考强度、system、工具 schema、历史前缀与上轮实际输出。变更后取消旧 prompt，并让这一轮报 `AGY_SESSION_UNRECOVERABLE`（不按新历史重放）。宿主注入块（`time-context` / `runtime-context` / 目录 / 指令，即 `source.form` 为 `snapshot`/`catalog`/`instructions`/`recall` 的 user 消息）不参与前缀比较，也不阻挡续轮：它们由 pre-step 在请求生成时追加，位置与数量不由模型决定。真实用户消息、压缩检查点与模型选择记录仍按普通历史校验。`finish(tool-calls)` 只封住当前 DSH 输出，不代表官方 prompt 已结束；封口后到达的内容留给续轮。
 
-普通用户回合默认复用 ACP session，校验输入前缀和上一步实际输出，只发增量；编辑回答或外部 provider 的额外输出会让这一轮报 `AGY_SESSION_UNRECOVERABLE`（不重放）。模型/思考强度变化就地 `session/set_config_option`，不重建会话；system 与工具目录在会话创建时固定，变化沿用原会话。选模（`session/set_config_option`）只在**本会话自己**声明过 model 选择器、且当前值已经是目标值时短路：新会话省略 `configOptions` 时不会拿别的会话的 `currentValue` 短路，否则新会话会静默跑在 agent 默认模型上。`resumeSessions` 开启跨进程恢复（默认开启），恢复后校正模型；文本历史信封不等同于模型 API 的原生角色消息。上游 `end_turn` 没有可见文本或工具调用时返回 `AGY_EMPTY_RESPONSE`，仅思考或进度通知不算成功。
+普通用户回合默认复用 ACP session，校验输入前缀和上一步实际输出，只发增量；编辑回答或外部 provider 的额外输出会让 `session/resume` 失败，此时默认按 `replayFallback` 用最近历史重放新建会话（关闭该开关才报 `AGY_SESSION_UNRECOVERABLE`）。模型/思考强度变化就地 `session/set_config_option`，不重建会话；system 与工具目录在会话创建时固定，变化沿用原会话。选模（`session/set_config_option`）只在**本会话自己**声明过 model 选择器、且当前值已经是目标值时短路：新会话省略 `configOptions` 时不会拿别的会话的 `currentValue` 短路，否则新会话会静默跑在 agent 默认模型上。`resumeSessions` 开启跨进程恢复（默认开启），恢复后校正模型；文本历史信封不等同于模型 API 的原生角色消息。上游 `end_turn` 没有可见文本或工具调用时返回 `AGY_EMPTY_RESPONSE`，仅思考或进度通知不算成功。
 
 ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因拒绝次数终止整个对话，模型仍可改用 DSH 工具。已识别私有桥调用的 `kind` 仅用于展示；权限提示参数只供诊断，不因缺失或包装差异阻断，真正执行仍取自后续 `tools/call`。协议能力与权限拒绝**不是操作系统沙箱**，不证明官方二进制只能执行被协议观察到的操作。
 
