@@ -21,6 +21,7 @@ import { AntigravityAcpAdapter } from '../../src/adapter/antigravity-adapter.js'
 import type { AntigravityAcpAdapterOptions } from '../../src/adapter/antigravity-adapter.js'
 import { AcpLifecycle } from '../../src/runtime/lifecycle.js'
 import { createFileSessionMapStore } from '../../src/runtime/session-map.js'
+import type { SessionMapStore } from '../../src/runtime/session-map.js'
 import type { AgentLink as AgentLinkType } from '../../src/protocol/agent-link.js'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 
@@ -63,12 +64,20 @@ export interface RealAdapter {
  * @returns adapter 与其日志收集器。
  */
 export async function createRealAdapter(
-  options: Partial<AntigravityAcpAdapterOptions> & { cacheDir?: string } = {},
+  options: Partial<AntigravityAcpAdapterOptions> & {
+    cacheDir?: string
+    /** 共享给多个 adapter 的映射存储（生产里同一插件实例的 worker 共用一份）。 */
+    store?: SessionMapStore
+    /** 外部传入 store 时默认不关闭它，由调用方负责。 */
+    closeStore?: boolean
+  } = {},
 ): Promise<RealAdapter> {
   const logs: RealAdapterLogLine[] = []
   const links: AgentLinkType[] = []
-  const cacheDir = options.cacheDir ?? await fs.mkdtemp(join(tmpdir(), 'agy-real-'))
-  const store = createFileSessionMapStore(cacheDir, () => undefined)
+  const { store: sharedStore, closeStore, cacheDir: cacheOverride, ...adapterOverrides } = options
+  const cacheDir = cacheOverride ?? await fs.mkdtemp(join(tmpdir(), 'agy-real-'))
+  const store = sharedStore ?? createFileSessionMapStore(cacheDir, () => undefined)
+  const ownsStore = sharedStore === undefined
   const children: ChildProcess[] = []
   const runtimeDir = await fs.mkdtemp(join(tmpdir(), 'agy-run-'))
   const lifecycle = new AcpLifecycle()
@@ -130,7 +139,7 @@ export async function createRealAdapter(
         message: `${message}${error ? `: ${error instanceof Error ? error.message : String(error)}` : ''}`,
       }),
     },
-    ...options,
+    ...adapterOverrides,
   } as AntigravityAcpAdapterOptions)
 
   return {
@@ -141,7 +150,7 @@ export async function createRealAdapter(
     async dispose() {
       await teardown?.().catch(() => undefined)
       for (const child of children) child.kill('SIGKILL')
-      await store.close().catch(() => undefined)
+      if (ownsStore && closeStore !== false) await store.close().catch(() => undefined)
     },
   }
 }

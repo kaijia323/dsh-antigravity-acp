@@ -10,7 +10,13 @@
 - **修复：失败路径不再删除恢复映射**。`#resumeSession` 校验失败、MCP 桥被其他对话接管、异常终止、链接回收、prompt 构造失败都改为「丢内存 + 保留映射」，下一轮仍可 `session/resume`。仍会删除映射的只剩两处刻意场景：prompt 在途失效（`#advanceSession(settled=false)`，本轮历史尚未落定）与宿主删除 DSH 会话（`releaseConversation`，改为无条件 `purge`，重启后也能删）。会话迁移到其他 worker 时关闭本进程副本（配合已验证的「`session/close` 后可 resume」），避免两个进程同时持有同一 ACP 会话。
 - **改进：模型/思考强度变化不再重建会话**。既有 ACP 会话直接 `session/set_config_option` 应用新模型与档位（复用路径新增这一调用）；`session/resume` 不再因路由指纹变化拒绝恢复，恢复后把指纹同步为当前值。system 提示与工具目录在会话创建时固定，沿用原会话——恢复映射优先于「指纹完全一致」。
 - **新增单测**：接管不删条目、接管后旧 owner 写入/删除无效、磁盘条目在新 owner 写入前仍在。
-- 验证：`npm run check` 通过（typecheck + 411 项单测 + 构建）。
+- 验证：`npm run check` 通过（typecheck + 412 项单测 + 构建）。
+- **真机 E2E（2026-11-19 18:04–18:08，DSH 0.2.2-rc.5 + 真实 agy ACP 1.5.0 账号）**：
+  - 跨进程恢复（原有用例）：销毁 adapter 后用新实例 + 同一映射恢复并继续 ✅；
+  - 换 worker（新用例，共享 `SessionMapStore`、进程 A 的 ACP 仍存活）：进程 B 接管后 `已恢复 ACP 会话` 并正常继续 ✅；
+  - 空闲回收 600ms（新用例）：`关闭 ACP 会话（空闲回收，保留恢复映射）` → 下一轮 `已恢复 ACP 会话` ✅；
+  - 中途思考强度 low→high（新用例）：`档位路由 … effort=high` 就地应用、`复用 ACP 会话` 继续 ✅；
+  - DSH Web 真机（安装 fork.2 并重启宿主后）：Gemini 4 Neon 会话 2 轮正常，第 2 轮前把推理等级 Extra→High，会话继续并正确回答 ✅。
 
 ## 0.3.2-fork.1 · 2026-11-19（kaijia323 fork）
 
