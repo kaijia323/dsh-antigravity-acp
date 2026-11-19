@@ -157,15 +157,21 @@ describe.skipIf(!ENABLED)('会话映射在 worker 切换 / 空闲回收 / 路由
       const r1 = await drain(adapter.adapter.stream({ ...base, messages: [opening] }))
       expect(failCode(r1)).toBe('')
       const history: RequestMessage[] = [opening, ...assistantTurn(r1.blocks, MODEL)]
+      // 同一会话切到只支持 low/medium/high 的 gemini-4-argon 并携带 xhigh → 自动就近收敛到 high，不报 AGY_EFFORT_UNSUPPORTED
       const r2 = await drain(adapter.adapter.stream({
         ...base,
-        reasoningEffort: 'high' as never,
+        model: 'gemini-4-argon',
+        reasoningEffort: 'xhigh' as never,
         messages: [...history, userTurn('刚才让你做什么？只回关键动词')],
       }))
       const logs = adapter.logs.map((line) => line.message).join('\n')
+      const models = await adapter.adapter.listModels('antigravity-acp')
+      console.log('[改档位+目录] listModels =', models.map((m) => m.id).join(', '))
       console.log('[改档位] finish =', JSON.stringify(r2.finish), '| error =', r2.error ?? '-')
-      console.log('[改档位] 日志:\n' + logs.split('\n').filter((line) => /恢复|复用|放弃|失败|模型|档位/.test(line)).join('\n'))
-      expect(failCode(r2)).not.toContain('AGY_SESSION_UNRECOVERABLE')
+      console.log('[改档位] 日志:\n' + logs.split('\n').filter((line) => /恢复|复用|放弃|失败|模型|档位|收敛/.test(line)).join('\n'))
+      expect(failCode(r2)).toBe('')
+      expect(logs).toContain('自动就近收敛到 high')
+      expect(models.map((m) => m.id)).toEqual(expect.arrayContaining(['gemini-4-neon', 'gemini-4-argon', 'gemini-4-hydrogen', 'gemini-3.8-flash']))
     } finally {
       await adapter.dispose()
     }

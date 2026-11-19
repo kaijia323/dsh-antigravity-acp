@@ -63,6 +63,21 @@ describe('跨 Host 文件租约', () => {
     try { expect(await restarted.claim('chat', Symbol())).toEqual(entry(1)) }
     finally { await restarted.close() }
   })
+
+  it('崩溃残留的死进程锁（PID 已不存在）自动清理并接管映射', async () => {
+    const dir = await directory(), warning = vi.fn()
+    await writeSessionMap(dir, { chat: entry(2) })
+    // 写一个肯定不存在的超大合法 PID 模拟 SIGKILL 残留锁
+    await writeFile(join(dir, 'sessions.lock'), JSON.stringify({ pid: 2147483646, token: 'stale' }))
+    const store = createFileSessionMapStore(dir, warning)
+    try {
+      expect(await store.claim('chat', Symbol())).toEqual(entry(2))
+      expect(warning).not.toHaveBeenCalled()
+    } finally {
+      await store.close()
+    }
+    expect(await readdir(dir)).toEqual(['sessions.json'])
+  })
 })
 
 describe('共享 SessionMapStore 所有权与串行提交', () => {

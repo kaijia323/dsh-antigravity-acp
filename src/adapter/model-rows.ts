@@ -28,8 +28,11 @@ export function mergeModelRows(
   acp: readonly LlmModelInfo[],
   cli: readonly CliModelRow[],
 ): LlmModelInfo[] {
-  const byId = new Map(acp.map((model) => [model.id, model]))
-  if (cli.length === 0) return [...byId.values()]
+  // 已经观测到 ACP 会话声明的模型目录时，以当前账号真正可用的模型为准，
+  // 不再把 CLI 清单里不可用的其它型号混进列表；仅在 ACP 目录为空（冷启动）时用 CLI 兜底。
+  if (acp.length > 0) return [...acp]
+  const byId = new Map<string, LlmModelInfo>()
+  if (cli.length === 0) return []
   for (const row of foldAgyModelFamilies(cli).models) {
     if (byId.has(row.id)) continue
     byId.set(row.id, {

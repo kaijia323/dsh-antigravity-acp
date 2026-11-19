@@ -4,6 +4,19 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.5 · 2026-11-19（kaijia323 fork）
+
+- **修复：切换模型时思考档位（如 `xhigh`）跨模型残留导致 `AGY_EFFORT_UNSUPPORTED`**。
+  1. `#reasoningInfo()` 现在按 CLI 目录里该家族真实支持的档位集合过滤（例如 Argon 只有 `low/medium/high`，不再因为 `catalog.json` 曾停在 Hydrogen 的 `xhigh` 就把 `xhigh` 报给 Argon）；
+  2. `clampEffort()` 恢复按 `low → medium → high → xhigh → max` 强弱顺序**自动就近收敛**（从 Hydrogen 的 `xhigh` 切到 Argon 时自动收敛到 `high` 并打日志，不再抛 `AGY_EFFORT_UNSUPPORTED` 中断对话）。
+- **修复：模型列表只显示当前账号 ACP 会话真正声明支持的模型**。`#foldCatalog()` 与 `mergeModelRows()` 在已观测到 ACP 会话 `configOptions`（或 `catalog.json`）时，只列出当前账号 ACP 实际声明的模型家族，不再把 `cli-models.json` 里当前认证不可用的其它型号（如 `gemini-pro-orchestrator-*`、`claude-*`）混进下拉框；CLI 清单仅用于补齐已支持家族的档位信息或冷启动为空时兜底。
+- **修复：选模/档位失败不再误杀健康的 ACP 进程或丢失会话复用**：
+  - `#prepareRound()` 在 `session/new` 成功后若选模失败，只关闭刚建的临时会话，不回收整个 `agy_acp_server` 进程；
+  - `#resumeSession()` 在 `session/resume` 成功后若选模失败，关闭对端会话并归还磁盘 claim，不伪装成 `AGY_SESSION_UNRECOVERABLE` 触发无意义的重放；
+  - `#runNewRound()` 在内存复用会话上切模型失败时归还 claim 并保留原 `reused.route`，用户换回可用模型后下一轮零重放继续。
+- **修复：`sessions.lock` 在宿主 `SIGKILL` / 断电崩溃后自动检测死进程 PID 并接管**，避免崩溃残留锁导致跨进程 `session/resume` 永久降级。
+- 验证：真机 E2E 验证从 `gemini-4-neon (low)` 就地切到 `gemini-4-argon (xhigh)` 自动收敛为 `high` 并复用同一 ACP 会话完成；离线单测 **418 项全部通过**。
+
 ## 0.3.2-fork.4 · 2026-11-19（kaijia323 fork）
 
 - **修复：切换到未观测容量的模型时 DSH 报 `MODEL_SWITCH_COMPACTION_FAILED`**（`no context capacity for antigravity-acp/gemini-4-hydrogen`）。官方 ACP 目录只报告模型 id/名称，真实上下文容量要等会话 `usage_update` 才能观测到；从 DeepSeek（1M）切到从未用过的 `gemini-4-hydrogen` 时 DSH 无法计算压缩目标，直接拒绝切换并保留原模型。现在 `resolveModel()` 对未观测模型给出可配置兜底窗口 `defaultContextWindow`（默认 **1048576**；Claude 家族封顶 **200000**；设 0 恢复旧行为），实测值仍然优先。

@@ -115,9 +115,21 @@ export async function writeSessionMap(cacheDir: string, entries: Record<string, 
   }
 }
 
+/** 检查锁文件中的 PID 是否仍在运行；已确认进程不存在（ESRCH）时视为死锁可安全清理。 */
+function isPidAlive(pid: unknown): boolean {
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false
+  if (pid === process.pid) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
 /**
- * 跨 Host 的排他写租约；另一实例持有缓存时，本实例仅保留内存复用，不读写恢复映射。
- * 不按 mtime 猜测锁过期：崩溃残留锁需在确认所有 Host 已退出后人工清理。
+ * 跨 Host 的排他写租约；另一存活实例持有缓存时，本实例仅保留内存复用，不读写恢复映射。
+ * 若残留锁记录的 PID 已不存在（SIGKILL / 断电崩溃残留），自动清理并接管。
  */
 export function createFileSessionMapStore(cacheDir: string, onError?: () => void): SessionMapStore {
   const file = join(cacheDir, 'sessions.lock')
@@ -127,7 +139,28 @@ export function createFileSessionMapStore(cacheDir: string, onError?: () => void
   return new SessionMapStore({
     load: async () => {
       await mkdir(cacheDir, { recursive: true })
-      handle = await open(file, 'wx', 0o600)
+      try {
+        handle = await open(file, 'wx', 0o600)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          const raw = await readFile(file, 'utf8').catch(() => '')
+          let stale = false
+          try {
+            const parsed = JSON.parse(raw) as { pid?: unknown }
+            stale = !isPidAlive(parsed?.pid)
+          } catch {
+            stale = false
+          }
+          if (stale && await readFile(file, 'utf8').catch(() => '') === raw) {
+            await unlink(file).catch(() => undefined)
+            handle = await open(file, 'wx', 0o600)
+          } else {
+            throw error
+          }
+        } else {
+          throw error
+        }
+      }
       await handle.writeFile(marker, 'utf8')
       ready = true
       return readSessionMap(cacheDir)

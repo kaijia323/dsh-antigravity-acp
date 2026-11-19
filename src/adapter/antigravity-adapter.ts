@@ -673,15 +673,26 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     // 磁盘缓存来自 ACP 原始档位观测，优先于其它 worker 的 CLI 家族兜底。
     const cached = this.#catalog.length > 0 ? this.#catalog : await this.#cachedModels(provider)
     const source = cached.length > 0 ? cached : [...this.#fallbackCatalog]
+    const acpRows = source
+      .filter((model) => model.id !== AGY_PLACEHOLDER_MODEL_ID)
+      .map((model) => ({
+        id: model.id,
+        name: model.name,
+        ...(model.description === undefined ? {} : { description: model.description }),
+      }))
+    const cliRows = await this.#cliRawRows()
+    // 已经观测到 ACP 会话声明的模型目录时，只暴露当前账号真正支持的家族，
+    // 不把 CLI 清单里当前登录态不可用的型号（如 orchestrator / claude）混进选择器；
+    // CLI 行仅用于补齐已支持家族的档位集合（如 Hydrogen 的 xhigh），或冷启动为空时兜底。
+    const acpFamilies = acpRows.length > 0
+      ? new Set(acpRows.map((row) => modelFamilyId(row.id)))
+      : undefined
+    const filteredCliRows = acpFamilies === undefined
+      ? cliRows
+      : cliRows.filter((row) => acpFamilies.has(modelFamilyId(row.id)))
     const folded = foldAgyModelFamilies([
-      ...source
-        .filter((model) => model.id !== AGY_PLACEHOLDER_MODEL_ID)
-        .map((model) => ({
-          id: model.id,
-          name: model.name,
-          ...(model.description === undefined ? {} : { description: model.description }),
-        })),
-      ...await this.#cliRawRows(),
+      ...acpRows,
+      ...filteredCliRows,
     ])
     // 目录可能在 CLI 缓存读取期间更新；旧折叠结果不能覆盖新观测。
     if (generation === this.#catalogFoldGeneration) {
@@ -808,23 +819,30 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   #reasoningInfo(model: string, familyTiers = this.#familyTiers): LlmModelReasoningInfo | undefined {
     const thought = this.#thoughtLevel
     if (thought) {
-      const efforts = reasoningsFrom(thought.options)
-      // `thought_level` 的选项跟随 agent **当前模型**：会话停在 Argon/Claude 时，
-      // 选项里不会有 Hydrogen 的 `xhigh`。只按它声明会让 Hydrogen 少一档，所以
-      // 再并上官方 CLI 目录里该家族真实存在的档位（`gemini-4-hydrogen-xhigh`）。
+      let efforts = reasoningsFrom(thought.options)
+      // `thought_level` 的选项跟随 agent **当前模型**：
+      // - 会话停在 Argon 时，选项里不会有 Hydrogen 的 `xhigh` → 并上 CLI 目录里该家族真实存在的档位；
+      // - 会话（或 catalog.json 缓存）停在 Hydrogen 时，选项里带了 `xhigh` 和 `currentValue: "xhigh"`，
+      //   切到 Argon/Neon/Flash 时若原样照搬，会让不支持 xhigh 的模型默认选上 xhigh。
+      // 因此当 CLI 目录已明确知道该家族有哪些档位（tiers.size > 0）时，同时按它过滤掉不属于该家族的档位。
       const tiers = familyTiers.get(modelFamilyId(model))
-      for (const tier of tiers ?? []) {
-        if (efforts.some((entry) => entry.id.toString() === tier)) continue
-        efforts.push({ id: ReasoningEffortId(tier), name: TIER_LABELS[tier] ?? tier })
+      if (tiers !== undefined && tiers.size > 0) {
+        efforts = efforts.filter((entry) => tiers.has(entry.id.toString() as AgyModelTier))
+        for (const tier of tiers) {
+          if (efforts.some((entry) => entry.id.toString() === tier)) continue
+          efforts.push({ id: ReasoningEffortId(tier), name: TIER_LABELS[tier] ?? tier })
+        }
       }
       if (efforts.length === 0) return undefined
       efforts.sort((a, b) => effortRank(a.id.toString()) - effortRank(b.id.toString()))
       const preferred = thought.currentValue === undefined
         ? undefined
         : efforts.find((entry) => entry.id === ReasoningEffortId(thought.currentValue as string))
-      // 当前值可能来自别的模型（例如 Hydrogen 的 xhigh 切到 Claude 后不在选项里），
-      // 这时退回官方默认 medium，不指向不存在的选项。
-      const fallback = preferred ?? efforts.find((entry) => entry.id === ReasoningEffortId(DEFAULT_AGY_REASONING_EFFORT))
+      // 当前值可能来自别的模型（例如 Hydrogen 的 xhigh 切到 Argon 后不在选项里），
+      // 这时退回官方默认 medium（或列表最后一项），绝不指向该模型不存在的档位。
+      const fallback = preferred
+        ?? efforts.find((entry) => entry.id === ReasoningEffortId(DEFAULT_AGY_REASONING_EFFORT))
+        ?? efforts[efforts.length - 1]
       return { efforts, ...(fallback ? { defaultEffort: fallback.id } : {}) }
     }
     // 旧协议兼容：档位被编进模型 id，只能从目录里推断有哪些档位。
@@ -954,6 +972,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     }
     if (!link.supportsResumeSession()) return fail('agent 未声明 session/resume')
     this.#suppressUpdates += 1
+    let resumedResponse: Awaited<ReturnType<AgentLink['resumeSession']>>
     try {
       const timeoutMs = Math.min(this.#promptTimeoutMs, this.#sessionTimeoutMs)
       const request = {
@@ -962,13 +981,11 @@ export class AntigravityAcpAdapter extends LlmAdapter {
         mcpServers,
         _meta: { antigravity: { enabledTools: [], eagerMcpServers: tools.length > 0 ? [BRIDGE_MCP_SERVER_NAME] : [] } },
       }
-      const response = await link.resumeSession(request, { signal: options.signal, timeoutMs })
+      resumedResponse = await link.resumeSession(request, { signal: options.signal, timeoutMs })
       // load 恢复的是既有会话：它的 system prompt 已在创建时确定，这里既不重发
       // meta（会重复追加）也不塞文本块（会重复指令）。
-      this.observeSessionConfigOptions(response.configOptions)
-      if (findModelSelector(response.configOptions)) this.#rememberSessionModelSelector(entry.sessionId)
-      await this.#applyModelSelection(link, entry.sessionId, options.model, options.reasoningEffort, options.signal)
-      await this.#applyAgentMode(link, entry.sessionId, response.modes, options.signal)
+      this.observeSessionConfigOptions(resumedResponse.configOptions)
+      if (findModelSelector(resumedResponse.configOptions)) this.#rememberSessionModelSelector(entry.sessionId)
       throwIfAborted(options.signal)
     } catch (error) {
       this.#log?.warn(`antigravity-acp: 会话恢复失败（session/resume）session=${entry.sessionId}`, error)
@@ -980,6 +997,19 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       return fail(`session/resume 失败：${(error as { message?: string }).message ?? String(error)}`)
     } finally {
       this.#suppressUpdates -= 1
+    }
+    try {
+      await this.#applyModelSelection(link, entry.sessionId, options.model, options.reasoningEffort, options.signal)
+      await this.#applyAgentMode(link, entry.sessionId, resumedResponse.modes, options.signal)
+      throwIfAborted(options.signal)
+    } catch (error) {
+      // session/resume 已成功建立，失败的只是选模/档位配置（例如选了当前认证不支持的模型）：
+      // 关闭该对端会话并归还磁盘 claim，既不杀健康的 ACP 进程，也不伪装成 SESSION_UNRECOVERABLE
+      // 触发无意义的重放（重放同样会在同一模型上被拒）；用户换回可用模型后下一轮仍可 resume。
+      this.#closeSession(link, entry.sessionId)
+      this.#sessionStore?.unclaim(key, this.#sessionOwner)
+      throwIfAborted(options.signal)
+      throw error
     }
     const record: ReusedSession = {
       key,
@@ -1403,6 +1433,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
   /** 启动阶段也响应取消；迟到资源先回收，后续回合不能越过清理屏障。 */
   async #prepareRound(options: GenerateOptions, owner?: string) {
     let link: AgentLink | undefined
+    let createdSessionId: string | undefined
     const check = (): void => {
       if (this.#disposed) throw new LlmError('Antigravity ACP adapter 已卸载', 'AGY_LINK_CLOSED')
       throwIfAborted(options.signal)
@@ -1437,6 +1468,7 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           ...(systemViaMeta ? { systemPrompt: { append: options.system } } : {}),
         } },
       }, { signal: options.signal, timeoutMs: this.#sessionTimeoutMs })
+      createdSessionId = session.sessionId
       check()
       if (systemViaMeta) this.#systemViaMeta.add(session.sessionId)
       this.observeSessionConfigOptions(session.configOptions)
@@ -1459,6 +1491,14 @@ export class AntigravityAcpAdapter extends LlmAdapter {
           if (this.#unrecycledLink === link) this.#unrecycledLink = undefined
         })
         void this.#cleanup.catch(() => undefined)
+      } else if (link && createdSessionId !== undefined && !link.closed) {
+        // session/new 已经成功建立，失败的只是选模/档位配置（例如选了不可用模型）：
+        // 只关闭刚建的临时会话，不回收健康的 ACP 进程，避免连带杀掉同连接的其它状态。
+        this.#systemViaMeta.delete(createdSessionId)
+        this.#sessionModelDeclared.delete(createdSessionId)
+        this.#sessionModelValues.delete(createdSessionId)
+        this.#sessionThoughtValues.delete(createdSessionId)
+        this.#closeSession(link, createdSessionId)
       } else {
         this.#bridge.invalidateRound('ACP 回合准备失败')
         if (link) this.#scheduleRecycle(link)
@@ -1523,8 +1563,16 @@ export class AntigravityAcpAdapter extends LlmAdapter {
       // system 提示与工具目录在会话创建时已固定，沿用原会话（恢复映射比重建更重要）。
       const route = this.#sessionRouteFingerprint(options)
       if (reused.route !== route) {
-        await this.#applyModelSelection(reused.link, reused.sessionId, options.model, options.reasoningEffort, options.signal)
-        reused.route = route
+        try {
+          await this.#applyModelSelection(reused.link, reused.sessionId, options.model, options.reasoningEffort, options.signal)
+          reused.route = route
+        } catch (error) {
+          // 既有会话切到不可用模型/档位失败：保留内存复用记录与磁盘 claim 归还，
+          // 用户换回可用模型后下一轮仍可零重放继续。
+          if (key !== undefined) this.#sessionStore?.unclaim(key, this.#sessionOwner)
+          this.#lifecycle?.failed(error)
+          throw error
+        }
       }
       this.#log?.info(
         `antigravity-acp: 复用 ACP 会话 session=${sessionId} 已发送消息=${reused.sentCount}` +
@@ -2027,6 +2075,11 @@ export class AntigravityAcpAdapter extends LlmAdapter {
     const fresh = this.#thoughtLevel ?? thought
     const desired = effortId === undefined ? undefined : clampEffort(effortId, fresh.options)
     if (desired === undefined) return
+    if (effortId !== undefined && desired !== effortId) {
+      this.#log?.info(
+        `antigravity-acp: 模型 ${model} 未声明思考档位 ${effortId}，自动就近收敛到 ${desired}（可选：${fresh.options.map((o) => o.value).join('/')}）`,
+      )
+    }
     const settled = this.#sessionThoughtValues.get(sessionId) === desired
       || (this.#sessionModelDeclared.has(sessionId) && fresh.currentValue === desired)
     if (settled) return
@@ -2155,17 +2208,33 @@ function reasoningsFrom(
 }
 
 /**
- * 请求的档位必须与 agent 声明的选项完全一致。没有就近收敛、没有退到第一项：
- * 请求了不存在的档位就报错，让调用方换档位，而不是替它猜。
+ * 把请求的思考档位收敛到 agent 实际声明的选项：
+ * - 完全匹配优先；
+ * - 否则按 low→medium→high→xhigh→max 强弱顺序就近收敛（例如从 Hydrogen 的 xhigh
+ *   切到只支持 low/medium/high 的 Argon/Neon 时自动收敛到 high，避免切模型后首轮报错）；
+ * - 请求值不在已知强弱序里时退回 medium 或最后一项。
  */
-function clampEffort(requested: string, options: readonly { value: string }[]): string | undefined {
+export function clampEffort(requested: string, options: readonly { value: string }[]): string | undefined {
   const values = options.map((option) => option.value)
   if (values.length === 0) return undefined
   if (values.includes(requested)) return requested
-  throw new LlmError(
-    `agent 未声明思考档位 ${requested}（可选：${values.join(' / ')}）。已禁用就近收敛：请改选一个已声明的档位。`,
-    AGY_ADAPTER_ERROR.EFFORT_UNSUPPORTED,
-  )
+  const wanted = (EFFORT_ORDER as readonly string[]).indexOf(requested)
+  if (wanted !== -1) {
+    let best: string | undefined
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const value of values) {
+      const index = (EFFORT_ORDER as readonly string[]).indexOf(value)
+      if (index === -1) continue
+      const distance = Math.abs(index - wanted)
+      if (distance < bestDistance || (distance === bestDistance && index > (EFFORT_ORDER as readonly string[]).indexOf(best ?? ''))) {
+        best = value
+        bestDistance = distance
+      }
+    }
+    if (best !== undefined) return best
+  }
+  if (values.includes(DEFAULT_AGY_REASONING_EFFORT)) return DEFAULT_AGY_REASONING_EFFORT
+  return values[values.length - 1]
 }
 
 /**
