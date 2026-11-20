@@ -95,3 +95,59 @@ describe('ACP 私有 MCP 权限路由解析（依赖会话禁用内置工具）'
     expect(parsePermissionHandoff(value, context)?.arguments).toBe('{}')
   })
 })
+
+describe('官方 1.5.13 agy acp（Go）权限形状：无 _meta，程序化名称 mcp_<server>_<tool>', () => {
+  function goRequest(): RequestPermissionRequest {
+    return {
+      sessionId: 'current',
+      toolCall: {
+        toolCallId: 'go-call', kind: 'other', status: 'pending',
+        name: 'mcp_dsh-tools_read',
+        title: 'Run mcp_dsh-tools_read',
+        rawInput: { path: 'a.txt' },
+      } as never,
+      options: [
+        { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+        { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+      ],
+    }
+  }
+
+  it('程序化名称 + 无问号标题精确命中目录后进入私有桥', () => {
+    expect(parsePermissionHandoff(goRequest(), context)).toEqual({ name: 'read', arguments: '{"path":"a.txt"}' })
+  })
+
+  it('兼容服务端在中间加短哈希的声明名（claims #26 实测存在）', () => {
+    const value = goRequest()
+    ;(value.toolCall as { name?: string }).name = 'mcp_dsh-tools_5406866c_read'
+    ;(value.toolCall as { title?: string }).title = 'Run mcp_dsh-tools_5406866c_read'
+    expect(parsePermissionHandoff(value, context)?.name).toBe('read')
+  })
+
+  it('只给程序化名称或只给标题也能命中', () => {
+    const nameOnly = goRequest(); delete (nameOnly.toolCall as { title?: string }).title
+    expect(parsePermissionHandoff(nameOnly, context)?.name).toBe('read')
+    const titleOnly = goRequest(); delete (titleOnly.toolCall as { name?: string }).name
+    expect(parsePermissionHandoff(titleOnly, context)?.name).toBe('read')
+  })
+
+  it('外部服务器前缀、未知工具、原生名字一律不转交', () => {
+    for (const mutate of [
+      (value: RequestPermissionRequest) => { (value.toolCall as { name?: string }).name = 'mcp_other_read' },
+      (value: RequestPermissionRequest) => { (value.toolCall as { name?: string }).name = 'mcp_dsh-tools_unknown' },
+      (value: RequestPermissionRequest) => { (value.toolCall as { name?: string }).name = 'run_command' },
+      (value: RequestPermissionRequest) => { (value.toolCall as { title?: string }).title = 'Run mcp_other_read' },
+    ]) {
+      const value = goRequest(); mutate(value)
+      expect(parsePermissionHandoff(value, context)).toBeUndefined()
+    }
+  })
+
+  it('rawInput 里的 ServerName / ToolName 信封不被当成路由身份', () => {
+    const value = goRequest()
+    delete (value.toolCall as { name?: string }).name
+    delete (value.toolCall as { title?: string }).title
+    ;(value.toolCall as { rawInput?: unknown }).rawInput = { ServerName: 'dsh-tools', ToolName: 'read', Arguments: { path: 'a.txt' } }
+    expect(parsePermissionHandoff(value, context)).toBeUndefined()
+  })
+})

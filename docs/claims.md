@@ -30,7 +30,7 @@
 | 13 | `eagerMcpServers: ["dsh-tools"]` 预加载桥 | 同上 | ✅ | ACP 日志与 `mcp/dsh-tools` 目录 |
 | 14 | `usage_update.size/used` 是当前上下文而非累计 | `adapter/prompt-turn.ts` | ✅ | 0.1.52：修复 360%/411% 的实测 |
 | 15 | MCP 工具可在同一 prompt 内被调用、回填并继续生成 | `adapter/prompt-turn.ts`、`bridge/mcp-bridge.ts` | ✅ | 集成用例「MCP 工具：agent 调用工具并在同一 prompt 内拿到结果继续」：真机调用 `ping` 得到 `pong:hello`、`end_turn` |
-| 16 | MCP 桥的 loopback + bearer token + 权限握手 | `bridge/mcp-bridge.ts` | 🟡 | 假 agent + 本地 SOCKS 测试；真机只见过日志片段 |
+| 16 | MCP 桥的 loopback + bearer token + 权限握手 | `bridge/mcp-bridge.ts` | ✅ | 2026-11-20 真机（1.5.13 `agy acp`，隔离 HOME）：权限请求按服务端生成名识别后回 `allow_once`，工具结果回填后续轮 `stop`；同日复现拒绝分支（旧解析器拒绝 → 上游取消 cascade → 回合只剩思考、插件报 `AGY_EMPTY_RESPONSE`） |
 | 17 | `session/set_mode` 接受 agent 声明的 mode（default/accept-edits/auto/plan） | 同上 | ✅ | 集成用例「…档位与模式可设置」：`set_mode` 返回 `{}` |
 | 18 | `set_config_option` 可能归一化模型 ID | 同上 | 🟡 | 假 agent |
 | 19 | 额度：`loadCodeAssist` → `retrieveUserQuotaSummary` 的端点与字段 | `runtime/quota.ts` | ✅ | 2026-11-18 真机取到 plan=Google AI Pro 与三个额度组 |
@@ -44,6 +44,7 @@
 | 27 | DSH `busyEnter: steer` 会把用户插话作为**真实 user 消息**追加在工具结果之后（不是宿主上下文） | `adapter/continuation-state.ts` | ✅ | 真机 2026-11-19 15:23 会话 `a25898d0`：seq 33 user/message（`source.kind=user`）紧跟工具结果；旧版同一形态会话 `d7bdbc39` 在此报 `AGY_SESSION_UNRECOVERABLE` |
 | 28 | 官方 ACP `session/new` 在冷启动 / 多 worker 并发时可能超过 30 秒 | `adapter/antigravity-adapter.ts`（`sessionTimeoutMs`） | ✅ | 真机 2026-11-19 15:07 子代理报 `ACP 请求超时（30000ms）: session/new`；同机 15:23 以 120 秒上限成功建立 Gemini 子代理并返回 `OK` |
 | 29 | 工具续轮中把文本附到最后一条工具结果，agent 会在同一 prompt 内看到并回应 | `adapter/antigravity-adapter.ts`（`tailDeliveryNote`） | ✅ | 真机 2026-11-19 15:23：steer「额外告诉我 6*7」→ 助手回复 `6 × 7 = 42`（该内容只出现在 steer 中） |
+| 30 | 1.5.13 `agy acp`（Go）的 MCP 权限请求**不带** `_meta.is_mcp_tool_call`/`_meta.mcp`：`toolCall.name = "mcp_<server>_<tool>"`、`title = "Run mcp_<server>_<tool>"`（无问号）、`rawInput` 带服务端注入的 `toolSummary`，options 为 `allow_once`/`reject_once` | `adapter/permission-handoff.ts` | ✅ | 2026-11-20 真机探针（隔离 HOME 逐字段 dump）：`mcp_dsh-tools_echo_probe` / `Run mcp_dsh-tools_echo_probe`；修复前拒绝 → 上游取消、修复后 `allow_once` → 工具续轮；回归用例 `tests/real-tool-permission.test.ts` |
 
 ## 优先验证顺序（按“错了会怎样”排序）
 
@@ -59,6 +60,7 @@
 
 ```bash
 AGY_REAL_ACP=1 npx vitest run tests/integration-real-agent.test.ts   # 全部真机断言
+AGY_REAL_ACP=1 npx vitest run tests/real-tool-permission.test.ts    # MCP 权限握手 → 工具续轮
 ```
 
 用例与断言的对应关系写在用例名里（上表“验证方式”列）；新增断言时同时补用例，
@@ -69,7 +71,6 @@ AGY_REAL_ACP=1 npx vitest run tests/integration-real-agent.test.ts   # 全部真
 | 断言 | 原因 |
 |---|---|
 | #5 `max_tokens` / `refusal` / `max_turn_requests` 等 stopReason | 无法稳定构造；代码里只当作“干净失败”白名单，标 ⚪ |
-| #16 桥的权限握手细节 | 真机只覆盖到“调用被批准并回填”，权限拒绝分支未构造 |
 | #18 `set_config_option` 归一化模型 ID | 需要 agent 返回不同 ID 的样本，未遇到 |
 | #20 OAuth 真机 | 需要真实 Google 授权，当前只用假 fetch |
 | #21 Windows 强制完整性 | 需要 Windows 实机 |

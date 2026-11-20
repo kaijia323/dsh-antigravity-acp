@@ -4,6 +4,17 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.7 · 2026-11-20（kaijia323 fork）
+
+- **修复：换用 1.5.13 `agy acp`（Go）后，任何 MCP 工具调用都会让整轮「运行失败」且用户只看到一句 `AGY_EMPTY_RESPONSE`。** 真机复现（2026-11-20 20:26，会话 `1e99d2c5`，Gemini 4 Neon）：
+  1. 1.5.13 的 `session/request_permission` 不再带 `_meta.is_mcp_tool_call` / `_meta.mcp`，改为服务端生成的 `toolCall.name = "mcp_dsh-tools_run_code"`、`title = "Run mcp_dsh-tools_run_code"`（无问号）；旧解析器只认 1.4.0 元数据与旧 `Run <tool>?` 标题，于是把私有桥工具当成原生能力拒绝；
+  2. 客户端拒绝授权后服务端立即「工具确认失败」并取消 cascade，回合只剩思考、没有文本 → 插件按设计报 `AGY_EMPTY_RESPONSE`，宿主显示「本轮运行失败」；
+  3. 用户看到的现象是「模型没回任何东西」，但根因在权限握手，不在模型。
+- 修复 `src/adapter/permission-handoff.ts`：新增对 `mcp_<server>_<tool>` 程序化名称与 `Run ...` 标题的精确匹配（兼容服务端在中间加短哈希的声明形，claims #26）；只认服务端生成字段与当前会话已公布目录，仍不从 `rawInput` 的模型可控字段推路由；指向其它 server 的 `mcp_` 身份一律拒绝。
+- 错误信息可诊断：`AGY_EMPTY_RESPONSE` 现在会带「本回合有 N 次未识别的权限/原生请求被拒绝」，并新增 1.5.13 权限形状的真机回归 `tests/real-tool-permission.test.ts`（真机夹具改为与生产一致、不带 `--dangerously-skip-permissions`）。
+- 次要：1.5.13 权限提示 `rawInput` 注入的 `toolSummary` 展示字段不再被 schema 预检当成「未声明键」刷警告（它本来就不会进入真正的 `tools/call`）。
+- 验证：离线单测覆盖 1.5.13 形状（含短哈希中间段、外部 server 前缀、原生名拒绝、rawInput 信封不参与路由）；真机探针确认授权 → `tool-calls` → 回填 `pong:ping` → `stop`；`npm run check` 全绿。
+
 ## 0.3.2-fork.6 · 2026-11-20（kaijia323 fork）
 
 - **修复：access token 每小时过期后额度读取报「access token 已过期且无法取得 OAuth client 元数据（可设 AGY_OAUTH_CLIENT_ID/SECRET）」**。三个叠加原因：

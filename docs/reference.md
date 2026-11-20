@@ -63,7 +63,7 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 - 兼容旧 agent：没有 `thought_level` 时，官方档位化目录（`claude-opus-5-5-high`）折叠成家族并退回「档位后缀」路由，缺档取最近档位，未指定通常使用 `medium`。`gpt-oss-120b` 家族不列入选择器。
 - 目录里没有任何档位变体、agent 也没声明 `thought_level` 的家族 id **不声明**思考强度菜单（省略 `reasoning` 字段）：宿主把 `efforts: []` 判为非法元数据（`INVALID_MODEL_REASONING`）并使该模型不可用，空数组不等于「没有档位」。
 - 旧 `server-default` 路由仍兼容：默认沿用上游模型，配置了映射时才写入映射目标；不再新增占位选择项。
-- **用满 agent 声明的 ACP 能力**：`_meta.antigravity.systemPrompt.append` 为 true 时，system prompt 随 `session/new` 的 `_meta` 交给 agent 追加到它自己的系统提示（实测 1.5.10 生效），prompt 里不再重复包 `<dsh-system>` 文本块；`sessionCapabilities.resume` 为 true 时跨进程恢复用 `session/resume`（不重放历史），没有该能力就报错（不再退回 `session/load`）；配置了 `agentMode` 且该 mode 出现在会话的 `availableModes` 里时才发 `session/set_mode`。fs / terminal / `session/request_permission` 仍然一律拒绝——工具必须回 DSH 审批执行。
+- **用满 agent 声明的 ACP 能力**：`_meta.antigravity.systemPrompt.append` 为 true 时，system prompt 随 `session/new` 的 `_meta` 交给 agent 追加到它自己的系统提示（实测 1.5.10 生效），prompt 里不再重复包 `<dsh-system>` 文本块；`sessionCapabilities.resume` 为 true 时跨进程恢复用 `session/resume`（不重放历史），没有该能力就报错（不再退回 `session/load`）；配置了 `agentMode` 且该 mode 出现在会话的 `availableModes` 里时才发 `session/set_mode`。fs / terminal 与未识别的原生权限请求仍然一律拒绝；只有已识别的私有 MCP 桥权限请求允许一次（`allow_once`），真正的工具执行仍回 DSH 审批——不会由协议层直接执行。
 - 上下文容量与占用不填猜测值。`usage_update.size` 才作为窗口、`usage_update.used`（Tokens currently in context）才作为占用上报给宿主并缓存；首次观测前未知。ACP 的 `PromptResponse.usage` 是**本回合内所有内部模型调用的求和**（`inputTokens` / `cachedReadTokens` / `outputTokens` 都是本回合各次调用之和，`totalTokens` 恰等于本轮各条 `usage_update.used` 之和），工具回合会把 prompt 侧统计放大成上下文窗口的数倍，所以不能当某一轮的上下文占用；本插件目前不转发它。
 - 模型、容量与图片能力在 worker 间同步；不因增加 worker 就虚构新模型权益。
 
@@ -88,9 +88,9 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 工具链路：
 
 1. 插件通过宿主 `ctx.subprocess` 以 stdio 启动官方 ACP server。
-2. 会话使用厂商扩展 `_meta.antigravity.enabledTools: []` 关闭内置工具，使用 `eagerMcpServers: ["dsh-tools"]` 提供当前 DSH 工具 schema。此扩展的默认适配基准是官方 server 1.4.0，不保证任意版本同样实现。
+2. 会话使用厂商扩展 `_meta.antigravity.enabledTools: []` 关闭内置工具，使用 `eagerMcpServers: ["dsh-tools"]` 提供当前 DSH 工具 schema。此扩展的默认适配基准是官方 server 1.4.0；1.5.13 `agy acp`（Go）已实测按同一扩展语义工作，但权限提示等协议细节会随版本变化（见 claims #30），不保证任意版本同样实现。
 3. 私有 MCP 桥仅绑定 `127.0.0.1`，新建带工具的 ACP 会话时轮换 token 与授权代次；同一会话复用时保留授权，桥被其他对话接管或归属变化时关闭本地副本并保留映射，下一轮 `session/resume` 重新注册桥。
-4. ACP 权限提示只对已识别私有桥请求选择 `allow_once`，不会自身产生 DSH 调用；真正的 `tools/call` 到桥后才挂起，并以 `tool-call` 交给 DSH。
+4. ACP 权限提示只对已识别私有桥请求选择 `allow_once`，不会自身产生 DSH 调用；真正的 `tools/call` 到桥后才挂起，并以 `tool-call` 交给 DSH。识别兼容两代官方形状：1.4.0/1.5.0 的 `_meta.is_mcp_tool_call + _meta.mcp` 与旧 `Run <tool>?` 标题；1.5.13 `agy acp` 的 `toolCall.name = "mcp_<server>_<tool>"` / 标题 `Run mcp_<server>_<tool>`（可含短哈希中间段）。只按服务端生成字段与当前会话目录精确匹配，不从 `rawInput` 里的模型可控字段猜路由。
 5. DSH 负责校验、审批、执行；工具结果按调用 ID 匹配，携带 `isError` 回填同一 ACP prompt。支持乱序结果与后续批次。
 
 桥可按 schema 修正常见、无歧义的参数别名，如 `path` / `AbsolutePath` → `file_path`、`CommandLine` → `command`。不覆盖已有字段，不猜多目标映射，不换算超时单位，不编造缺失说明。缺必填键时返回 `AGY_BRIDGE_INVALID_ARGUMENTS` 与正确签名，不进入 DSH；字段类型与取值仍由 DSH 校验。
@@ -99,7 +99,7 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 
 普通用户回合默认复用 ACP session，校验输入前缀和上一步实际输出，只发增量；编辑回答或外部 provider 的额外输出会让 `session/resume` 失败，此时默认按 `replayFallback` 用最近历史重放新建会话（关闭该开关才报 `AGY_SESSION_UNRECOVERABLE`）。模型/思考强度变化就地 `session/set_config_option`，不重建会话；system 与工具目录在会话创建时固定，变化沿用原会话。选模（`session/set_config_option`）只在**本会话自己**声明过 model 选择器、且当前值已经是目标值时短路：新会话省略 `configOptions` 时不会拿别的会话的 `currentValue` 短路，否则新会话会静默跑在 agent 默认模型上。`resumeSessions` 开启跨进程恢复（默认开启），恢复后校正模型；文本历史信封不等同于模型 API 的原生角色消息。上游 `end_turn` 没有可见文本或工具调用时返回 `AGY_EMPTY_RESPONSE`，仅思考或进度通知不算成功。
 
-ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因拒绝次数终止整个对话，模型仍可改用 DSH 工具。已识别私有桥调用的 `kind` 仅用于展示；权限提示参数只供诊断，不因缺失或包装差异阻断，真正执行仍取自后续 `tools/call`。协议能力与权限拒绝**不是操作系统沙箱**，不证明官方二进制只能执行被协议观察到的操作。
+ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因拒绝次数终止整个对话，模型仍可改用 DSH 工具。已识别私有桥调用的 `kind` 仅用于展示；权限提示参数只供诊断，不因缺失或包装差异阻断，真正执行仍取自后续 `tools/call`（服务端注入的 `toolSummary` 展示字段不计入 schema 预检）。上游权限格式不兼容的表现是：客户端拒绝授权 → 服务端取消 cascade → 回合只返回思考、插件报 `AGY_EMPTY_RESPONSE`，错误信息会带本回合未识别授权请求次数。协议能力与权限拒绝**不是操作系统沙箱**，不证明官方二进制只能执行被协议观察到的操作。
 
 ## 图片输入
 
@@ -221,7 +221,7 @@ onefile 临时展开使用用户级根目录内独立的 `runtime/instance-*`，
 | `AGY_INCOMPATIBLE_PROTOCOL` / `AGY_UNSUPPORTED_CAPABILITY` | 协议版本或 MCP 等能力不满足 | 使用兼容 ACP v1 的官方 server；不只修改版本号就假定厂商扩展兼容。 |
 | `AGY_IMAGE_UNAVAILABLE` / `AGY_INVALID_IMAGE` | 附件服务 / image capability 不在场，或附件引用不一致 | 重新连接检查能力与附件；不要将文字描述误当已发送图片像素。 |
 | `AGY_BRIDGE_INVALID_ARGUMENTS` | 参数别名修正后仍缺必填键 | 按错误中签名补齐；模糊别名不由桥猜测。 |
-| `AGY_EMPTY_RESPONSE` | 上游结束时没有可见文本或工具调用 | 查看结束原因与 Host 日志；不把仅思考、进度或空白当成功。 |
+| `AGY_EMPTY_RESPONSE` | 上游结束时没有可见文本或工具调用（错误信息会带本回合未识别权限/原生请求次数） | 查看结束原因与 Host 日志；若同时有授权请求被拒，核对 ACP 权限格式是否与插件版本匹配；不把仅思考、进度或空白当成功。 |
 | `AGY_ARCHIVE_TOO_LARGE` | 下载的 zip 条目数或解压后大小超过上限 | 官方包远低于上限；出现此码说明下载源异常，先核对 `AGY_ACP_URL` 未被改指他处，再重新下载，不要放宽上限。 |
 | 额度 / Credits 不完整 | CLI 未登录、旧版本缺字段、HTTP 产品授权不足或网络失败 | 分别查看额度与 Credits 状态，检查 `agyCliPath`；ACP 登录不等于 CLI 登录。 |
 | 药丸完全消失 | 未选择本 provider，或 Client / remote 未装载 | 先确认选中 `antigravity-acp`、Host 与 Client 同版本；开发时核对 `$mount` 与依赖，避免让贡献型 remote 等待自身。 |

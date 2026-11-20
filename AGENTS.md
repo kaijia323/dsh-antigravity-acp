@@ -46,7 +46,7 @@ npm 包名 `dsh-bundle-antigravity-acp`、provider ID `antigravity-acp`、内部
 - 协议约束不是 OS 沙箱；ACP fs / terminal 与未知原生权限请求一律拒绝。
 - `temperature` / `stop` 无 ACP v1 会话通道，记录警告并忽略；`maxTokens` 忽略；`reasoningEffort` 写入 `thought_level`（旧 agent 则是档位路由键）。
 - 额度与 AI Credits 仅为参考值，不是计费依据；ACP 登录与 CLI 登录是两条链路。
-- ACP 能力按声明使用：`_meta.antigravity.systemPrompt.append` 为 true 时 system 走 `session/new` 的 meta（不再包 `<dsh-system>` 文本块）；`sessionCapabilities.resume` 为 true 时用 `session/resume`，没有该能力就报错（不再退回 `session/load`）；`agentMode` 只在 `availableModes` 声明过时才 `session/set_mode`。fs / terminal / request_permission 一律拒绝（工具回 DSH 执行）。
+- ACP 能力按声明使用：`_meta.antigravity.systemPrompt.append` 为 true 时 system 走 `session/new` 的 meta（不再包 `<dsh-system>` 文本块）；`sessionCapabilities.resume` 为 true 时用 `session/resume`，没有该能力就报错（不再退回 `session/load`）；`agentMode` 只在 `availableModes` 声明过时才 `session/set_mode`。fs / terminal 与未识别的原生权限请求一律拒绝；只有已识别的私有 MCP 桥权限请求允许一次，实际执行仍回 DSH 审批（工具回 DSH 执行）。
 - 上下文容量与占用只在实测到 `usage_update.size` / `used` 后才声明，不填猜测值；ACP 的 `PromptResponse.usage` 是**本回合内所有内部模型调用的求和**（`totalTokens` = Σ `usage_update.used`，实测 3 次调用 27150 vs 回合末上下文 9165），不得当成本轮上下文占用上报（否则宿主上下文压力会按内部调用次数算成窗口的数倍）。
 - 版本与测试范围见 [README 兼容性矩阵](README.md#兼容性与验证范围)；宽 peer 范围是安装条件，不是全部 Core / 平台实机兼容证明。
 

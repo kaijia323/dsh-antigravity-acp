@@ -63,6 +63,8 @@ npm pack
 
 0.3.2-fork.1（kaijia323，2026-11-19）复检：`npm run check` 通过（typecheck + 410+ 单测 + build）；真机 E2E 在 DSH 0.2.2-rc.5 + 本机 Gemini 账号完成——工具执行中 steer 的回合正常完成并回复 `6 × 7 = 42`，默认路由 Gemini 子代理成功返回 `OK`（无 `session/new` 超时）。证据会话：`session-a25898d0` / 子会话 `b5efdd10`。
 
+0.3.2-fork.7（kaijia323，2026-11-20）复检：`npm run check` 通过；真机（`agy acp` 1.5.13、隔离 HOME、生产同款启动参数）新增用例 `tests/real-tool-permission.test.ts` 通过——权限请求按 `mcp_<server>_<tool>` 识别 → `allow_once` → `tool-calls` → 回填 `pong:ping` → `stop`。故障复现证据：2026-11-20 20:26 DSH 会话 `1e99d2c5`（Gemini 4 Neon）首轮只产生思考块，ACP server 日志显示 `Monitor agy_tool_safety` 命中 `unsupported_tool: mcp_dsh-tools_run_code` 后 `Tool confirmation … approved=false` 并取消 cascade；旧解析器把该权限请求当成原生能力拒绝。
+
 | 验证项 | 状态与范围 |
 |---|---|
 | TypeScript | `npm run typecheck` 通过 |

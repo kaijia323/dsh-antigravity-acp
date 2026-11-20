@@ -259,6 +259,11 @@ export class PromptTurn {
     } catch {
       return
     }
+    // 1.5.13 的权限提示 rawInput 会注入 toolSummary 展示字段（服务端生成，
+    // 不进入真正的 tools/call）；工具没声明该键时不让它在预检里报"未声明键"。
+    const declared = plainRecord(plainRecord(tool.parameters)?.properties)
+    const candidate = plainRecord(args)
+    if (declared && candidate && !Object.hasOwn(declared, 'toolSummary')) delete candidate.toolSummary
     const { missing, unknown } = inspectToolArguments(tool, args)
     if (missing.length === 0 && unknown.length === 0) return
     this.#onArgumentIssues({
@@ -426,10 +431,15 @@ export class PromptTurn {
       return
     }
     if (response.stopReason === 'end_turn' && !this.#hasOutput) {
-      // end_turn 已应答，只是没有可见产出：同样是干净失败。
+      // end_turn 已应答，只是没有可见产出：同样是干净失败。本回合若拒绝过
+      // 未识别的工具授权请求（例如上游改了权限提示格式），这就是空回合的
+      // 直接原因，必须写进错误信息，否则用户只能看到"没有回复"。
+      const refused = this.#nativeRefusals > 0
+        ? `；本回合有 ${this.#nativeRefusals} 次未识别的权限/原生请求被拒绝，若反复出现请核对 ACP 权限格式`
+        : ''
       this.#fail({
         code: AGY_TURN_ERROR.EMPTY_RESPONSE,
-        message: 'Antigravity ACP 已结束回合，但没有返回可见文本或工具调用；本次不是成功回复',
+        message: `Antigravity ACP 已结束回合，但没有返回可见文本或工具调用${refused}；本次不是成功回复`,
       }, true)
       return
     }
@@ -597,6 +607,13 @@ export class PromptTurn {
     signal.addEventListener('abort', onAbort, { once: true })
     this.#abortCleanup = () => signal.removeEventListener('abort', onAbort)
   }
+}
+
+/** 只把普通对象当记录（数组/null 不算），用于可选的展示字段处理。 */
+function plainRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
 }
 
 function readErrorCode(error: unknown): string {

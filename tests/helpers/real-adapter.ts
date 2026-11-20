@@ -89,7 +89,10 @@ export async function createRealAdapter(
   ): Promise<AgentLinkType> => {
     signal?.throwIfAborted()
     lifecycle.starting()
-    const child = spawn(REAL_ADAPTER_BIN, ['acp', '--dangerously-skip-permissions'], {
+    // 不带 --dangerously-skip-permissions：生产路径（ctx.subprocess + binaryPath）
+    // 也不带它，MCP 权限握手必须走真实 session/request_permission，否则
+    // "权限格式不兼容 → 拒绝 → 上游取消 → 空回合" 这类问题在真机测试里被跳过。
+    const child = spawn(REAL_ADAPTER_BIN, ['acp'], {
       cwd: options.cwd ?? process.cwd(),
       env: {
         ...process.env,
