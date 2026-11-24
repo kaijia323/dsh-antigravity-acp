@@ -33,7 +33,7 @@
 | 16 | MCP 桥的 loopback + bearer token + 权限握手 | `bridge/mcp-bridge.ts` | ✅ | 2026-11-20 真机（1.5.13 `agy acp`，隔离 HOME）：权限请求按服务端生成名识别后回 `allow_once`，工具结果回填后续轮 `stop`；同日复现拒绝分支（旧解析器拒绝 → 上游取消 cascade → 回合只剩思考、插件报 `AGY_EMPTY_RESPONSE`） |
 | 17 | `session/set_mode` 接受 agent 声明的 mode（default/accept-edits/auto/plan） | 同上 | ✅ | 集成用例「…档位与模式可设置」：`set_mode` 返回 `{}` |
 | 18 | `set_config_option` 可能归一化模型 ID | 同上 | 🟡 | 假 agent |
-| 19 | 额度：`loadCodeAssist` → `retrieveUserQuotaSummary` 的端点与字段 | `runtime/quota.ts` | ✅ | 2026-11-18 真机取到 plan=Google AI Pro 与三个额度组 |
+| 19 | 额度：`loadCodeAssist` → `retrieveUserQuotaSummary` 的端点与字段；当前账号返回 2 个额度组（`Gemini Models`、`Claude and GPT models`），Argon 并入 `Gemini Models` | `runtime/quota.ts` | ✅ | 2026-11-24 真机（隔离账号 acc_1795102134232_2190af30，Google AI Pro，`agy` 1.5.15）：HTTP `retrieveUserQuotaSummary` 与 CLI `agy -p /usage --output-format json` 均只返回上述 2 组；HTTP `fetchAvailableModels` 交叉验证 `gemini-4-argon-{low,medium,high}` 的 `quotaInfo`（remainingFraction / resetTime）与其它 Gemini 模型逐字段一致，无独立 Argon bucket。2026-11-18 历史为 3 组 |
 | 20 | OAuth：PKCE、loopback 回调、token 交换 | `accounts/oauth.ts` | ⚪ | 只有假 fetch；真 Google 未验证（文档已承认） |
 | 21 | Windows 强制完整性（icacls 探测）影响会话建立 | `runtime/integrity.ts` | ⚪ | 从未在 Windows 实机跑过（文档已承认） |
 | 22 | `agy -p /usage` / `/credits` 输出格式 | `runtime/agy-cli.ts` | ✅ | 本机实跑日志 |

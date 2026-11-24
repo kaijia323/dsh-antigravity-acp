@@ -528,18 +528,46 @@ describe('额度药丸（conversation.input.right）', () => {
     expect(pillLabel(pill(props))).toContain('未知')
   })
 
-  it('Argon 只读自己的额度组，没有独立组时显示未知而不是借用 Gemini 组', () => {
-    const quotaSnapshot = { status: 'ok', groups: [
-      { name: 'Gemini Models', buckets: [{ window: '5h', remainingPct: 82 }] },
-      { name: 'Claude and GPT models', buckets: [{ window: '5h', remainingPct: 43 }] },
-    ] }
+  const twoPoolQuota = { status: 'ok', groups: [
+    { name: 'Gemini Models', buckets: [{ window: '5h', remainingPct: 82 }, { window: 'weekly', remainingPct: 71 }] },
+    { name: 'Claude and GPT models', buckets: [{ window: '5h', remainingPct: 43 }] },
+  ] }
+
+  /**
+   * 2026-11-24 起 Google 只返回两池（Gemini Models / Claude and GPT models），Argon 并进 Gemini 池；
+   * 药丸必须读共享的 Gemini 窗口，而不是继续等一个已经不存在的独立 Argon 组。
+   */
+  it('两池响应下 Argon 药丸读取共享的 Gemini 池（族名 + 最低窗口 + 迷你条）', () => {
+    for (const model of ['gemini-4-argon', 'gemini-4-argon-high']) {
+      const store = { ...modelStore('antigravity-acp'), getSnapshot: () => ({ current: { provider: 'antigravity-acp', model } }) }
+      const tree = loadRegistrations({ quotaSnapshot: twoPoolQuota }).get('antigravity-quota')!.component({ store })
+      // 族名是 Gemini，数值取 Gemini 池里最低的窗口 71%，不再是「未知」。
+      expect(pillLabel(tree)).toBe('Gemini 71% · 5 小时 82% 剩余 · 每周 71% 剩余')
+      expect(pillLabel(tree)).not.toContain('未知')
+      const bars = elements(tree).filter((item) => item.props.role === 'progressbar')
+      expect(bars.map((bar) => bar.props['aria-valuenow'])).toEqual([82, 71])
+      expect(bars).toHaveLength(2)
+    }
+  })
+
+  it('两池响应下未知模型仍显示「未知」，绝不借用 Gemini / Claude 额度', () => {
+    for (const model of ['custom-id', 'server-default']) {
+      const store = { subscribe: () => () => {}, getSnapshot: () => ({ current: { provider: 'antigravity-acp', model } }) }
+      const tree = loadRegistrations({ quotaSnapshot: twoPoolQuota }).get('antigravity-quota')!.component({ store })
+      expect(pillLabel(tree)).toContain('未知')
+      expect(pillLabel(tree)).not.toContain('71%')
+      expect(pillLabel(tree)).not.toContain('43%')
+      expect(elements(tree).filter((item) => item.props.role === 'progressbar')).toHaveLength(0)
+    }
+  })
+
+  it('遗留三池响应下 Argon 仍读独立组，不污染 Gemini 池', () => {
     const store = { ...modelStore('antigravity-acp'), getSnapshot: () => ({ current: { provider: 'antigravity-acp', model: 'gemini-4-argon-high' } }) }
-    const shared = loadRegistrations({ quotaSnapshot }).get('antigravity-quota')!.component({ store })
-    expect(pillLabel(shared)).toContain('未知')
-    expect(pillLabel(shared)).not.toContain('82%')
-    const separate = loadRegistrations({ quotaSnapshot: { ...quotaSnapshot, groups: [...quotaSnapshot.groups, { name: 'Gemini 4 Argon', buckets: [{ window: 'weekly', remainingPct: 12 }] }] } }).get('antigravity-quota')!.component({ store })
-    expect(pillLabel(separate)).toContain('12%')
+    const legacy = { ...twoPoolQuota, groups: [...twoPoolQuota.groups, { name: 'Gemini 4 Argon', buckets: [{ window: 'weekly', remainingPct: 12 }] }] }
+    const separate = loadRegistrations({ quotaSnapshot: legacy }).get('antigravity-quota')!.component({ store })
+    expect(pillLabel(separate)).toBe('Gemini 4 Argon 12% · 每周 12% 剩余')
     expect(pillLabel(separate)).not.toContain('82%')
+    expect(pillLabel(separate)).not.toContain('71%')
   })
 
   it('额度百分比缺失不能显示为零额度', () => {

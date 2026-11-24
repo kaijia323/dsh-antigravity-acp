@@ -75,10 +75,10 @@ function transport(initial = document()) {
   }
 }
 
-async function mount(remote: unknown, control?: unknown, readQuota?: unknown) {
+async function mount(remote: unknown, control?: unknown, readQuota?: unknown, extra: Record<string, unknown> = {}) {
   const { Card, intervals } = loadCard()
   let renderer!: ReactTestRenderer
-  await act(async () => { renderer = create(React.createElement(Card, { remote, control, readQuota })) })
+  await act(async () => { renderer = create(React.createElement(Card, { remote, control, readQuota, ...extra })) })
   renderers.push(renderer)
   return { renderer, intervals }
 }
@@ -118,23 +118,23 @@ describe('quota pill with real React state and effects', () => {
     expect(renderer.root.findByProps({ role: 'status' }).props['aria-label']).toContain('Gemini 82%')
   })
 
-  it('Argon 模型只读自己的额度组，不借用 Gemini 组', async () => {
-    const readQuota = async () => ({
+  it('Argon 默认共享 Gemini 池；只有上游返回独立 Argon 组时才单独读取', async () => {
+    // 当前 Google 只返回两池：Argon 并进 Gemini Models，药丸读共享的 Gemini 窗口。
+    const shared = await mountPill(async () => ({
       status: 'ok',
       groups: [
-        { name: 'Gemini', buckets: [{ window: '5h', remainingPct: 81 }] },
+        { name: 'Gemini Models', buckets: [{ window: '5h', remainingPct: 81 }] },
+        { name: 'Claude and GPT models', buckets: [{ window: '5h', remainingPct: 42 }] },
       ],
-    })
-    // 没有 Argon 组时显示未知，而不是拿 Gemini 组的 81% 冒充。
-    const missing = await mountPill(readQuota, 'gemini-4-argon')
-    expect(missing.root.findByProps({ role: 'status' }).props['aria-label']).toContain('未知')
-    expect(renderedText(missing)).not.toContain('81%')
-    // 有独立 Argon 组时就读它自己的。
+    }), 'gemini-4-argon')
+    expect(shared.root.findByProps({ role: 'status' }).props['aria-label']).toContain('Gemini 81%')
+    expect(renderedText(shared)).not.toContain('未知')
+    // 遗留三池账号仍返回独立 Argon 组：此时读它自己的 33%，不借用 Gemini 的 81%。
     const own = await mountPill(async () => ({
       status: 'ok',
       groups: [
-        { name: 'Gemini', buckets: [{ window: '5h', remainingPct: 81 }] },
-        { name: 'Argon', buckets: [{ window: '5h', remainingPct: 33 }] },
+        { name: 'Gemini Models', buckets: [{ window: '5h', remainingPct: 81 }] },
+        { name: 'Gemini 4 Argon', buckets: [{ window: '5h', remainingPct: 33 }] },
       ],
     }), 'gemini-4-argon')
     expect(own.root.findByProps({ role: 'status' }).props['aria-label']).toContain('33%')
@@ -291,6 +291,101 @@ describe('settings card with real React state and effects', () => {
     expect(control).toHaveBeenCalledWith('account', { action: 'remove', id: 'acc_2' })
   })
 
+  /** 账号卡片里的额度分组 section（aria-label = 组名 + 额度）。 */
+  const quotaSections = (renderer: ReactTestRenderer) =>
+    renderer.root.findAll((node) => node.type === 'section'
+      && typeof node.props['aria-label'] === 'string' && node.props['aria-label'].endsWith('额度'))
+  const badgeCount = (section: ReactTestInstance) =>
+    section.findAll((node) => node.children.some((child) => child === '当前模型')).length
 
+  /** 当前 Google 只返回两池：Gemini Models + Claude and GPT models（Argon 并入 Gemini Models）。 */
+  const twoPoolQuota = {
+    status: 'ok', updatedAt: '2026-11-24T00:00:00.000Z', plan: 'Antigravity',
+    groups: [
+      { name: 'Gemini Models', buckets: [{ window: '5h', remainingPct: 73 }, { window: 'weekly', remainingPct: 51 }] },
+      { name: 'Claude and GPT models', buckets: [{ window: '5h', remainingPct: 44 }] },
+    ],
+  }
+  const legacyArgonQuota = {
+    ...twoPoolQuota,
+    groups: [...twoPoolQuota.groups, { name: 'Gemini 4 Argon', buckets: [{ window: 'weekly', remainingPct: 12 }] }],
+  }
+  const quotaStub = (snapshot: unknown) => Object.assign(vi.fn(async () => snapshot), { readAccount: vi.fn(async () => snapshot) })
+
+  it('账号卡片按两池渲染：只有 Gemini 与 Claude / GPT，没有空的 Argon 组', async () => {
+    const service = transport()
+    const { renderer } = await mount(service.remote, accountControl(), quotaStub(twoPoolQuota))
+    await act(async () => {})
+    const labels = quotaSections(renderer).map((node) => node.props['aria-label'])
+    expect(labels).toEqual(['Gemini额度', 'Claude / GPT额度'])
+    const text = renderedText(renderer)
+    expect(text).toContain('73%')
+    expect(text).toContain('44%')
+    // 不再出现「Gemini 4 Argon」占位组，也就没有「未提供额度数据」。
+    expect(text).not.toContain('Gemini 4 Argon')
+    expect(text).not.toContain('未提供额度数据')
+  })
+
+  it('遗留三池响应时账号卡片展示 3 组，Argon 仍是独立 section', async () => {
+    const service = transport()
+    const { renderer } = await mount(service.remote, accountControl(), quotaStub(legacyArgonQuota))
+    await act(async () => {})
+    expect(quotaSections(renderer).map((node) => node.props['aria-label']))
+      .toEqual(['Gemini额度', 'Claude / GPT额度', 'Gemini 4 Argon额度'])
+    expect(renderedText(renderer)).toContain('12%')
+  })
+
+  it('「当前模型」徽标跟随模型家族：Argon 默认落在 Gemini 组', async () => {
+    const service = transport()
+    const { renderer } = await mount(service.remote, accountControl(), quotaStub(twoPoolQuota), { model: 'gemini-4-argon' })
+    await act(async () => {})
+    const sections = quotaSections(renderer)
+    const gemini = sections.find((node) => node.props['aria-label'] === 'Gemini额度')!
+    const claude = sections.find((node) => node.props['aria-label'] === 'Claude / GPT额度')!
+    expect(badgeCount(gemini)).toBe(1)
+    expect(badgeCount(claude)).toBe(0)
+  })
+
+  it('未知模型不标任何额度组（绝不借用 Gemini / Claude 额度）', async () => {
+    const service = transport()
+    for (const model of ['custom-id', 'server-default']) {
+      const { renderer } = await mount(service.remote, accountControl(), quotaStub(twoPoolQuota), { model })
+      await act(async () => {})
+      expect(quotaSections(renderer).map((node) => node.props['aria-label']))
+        .toEqual(['Gemini额度', 'Claude / GPT额度'])
+      expect(badgeCount(quotaSections(renderer)[0]!)).toBe(0)
+      expect(badgeCount(quotaSections(renderer)[1]!)).toBe(0)
+    }
+  })
+
+  it('遗留三池响应时「当前模型」徽标落在独立 Argon 组', async () => {
+    const service = transport()
+    const { renderer } = await mount(service.remote, accountControl(), quotaStub(legacyArgonQuota), { model: 'gemini-4-argon-high' })
+    await act(async () => {})
+    const sections = quotaSections(renderer)
+    expect(sections.map((node) => node.props['aria-label']))
+      .toEqual(['Gemini额度', 'Claude / GPT额度', 'Gemini 4 Argon额度'])
+    expect(badgeCount(sections[0]!)).toBe(0)
+    expect(badgeCount(sections[2]!)).toBe(1)
+  })
+
+  it('模型分组把 Gemini 4 Argon 归在 Gemini 组下', async () => {
+    const service = transport()
+    const catalogWithArgon = { status: 'ok' as const, models: [
+      { id: 'gemini-4-argon-high', name: 'Gemini 4 Argon High' },
+      { id: 'gemini-3-pro', name: 'Gemini 3 Pro' },
+      { id: 'claude-sonnet-5-5', name: 'Claude Sonnet' },
+    ] }
+    const { renderer } = await mount(service.remote, controlWith(catalogWithArgon))
+    await act(async () => { button(renderer, '模型').props.onClick() })
+    const modelSections = renderer.root.findAll((node) => node.type === 'section'
+      && typeof node.props['aria-label'] === 'string' && node.props['aria-label'].endsWith(' 模型'))
+    expect(modelSections.map((node) => node.props['aria-label'])).toEqual(['Gemini 模型', 'Claude / GPT 模型'])
+    const gemini = modelSections.find((node) => node.props['aria-label'] === 'Gemini 模型')!
+    const chips = gemini.findAllByType('button').map((node) => node.children.join(''))
+    expect(chips).toContain('Gemini 4 Argon High')
+    expect(chips).toContain('Gemini 3 Pro')
+    expect(renderedText(renderer)).not.toContain('Gemini 4 Argon 模型')
+  })
 
 })

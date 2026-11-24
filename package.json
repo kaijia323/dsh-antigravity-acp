@@ -1,6 +1,6 @@
 {
   "name": "dsh-bundle-antigravity-acp",
-  "version": "0.3.2-fork.7",
+  "version": "0.3.2-fork.8",
   "description": "DeepSeek Harness host bundle that talks to the official Antigravity ACP server over stdio (Agent Client Protocol v1).",
   "displayName": "Antigravity ACP",
   "keywords": [

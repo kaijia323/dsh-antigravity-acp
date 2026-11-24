@@ -48,7 +48,7 @@ dsh plugin --profile web add ./dsh-bundle-antigravity-acp-0.1.39.tgz
 
 ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口；设置页只展示目录与账号卡片，不能用上一次成功状态代表当前进程仍存活。
 
-运行细节（启动、凭据准备、握手、建会话、选模型、首块、首个工具及续轮耗时）写在 Host 日志中，设置页不再单独提供诊断面板。额度与 Credits 在设置页「账号」卡片中查看：每个账号的额度明细直接铺开（分组 + 窗口 + 百分比 + 余量条 + 重置时间 + AI Credits），挂载时自动读取。对话输入框旁的药丸只是纯展示：显示当前所选模型所属家族的额度（族名 + 最低窗口百分比 + 迷你条），不可点击；Argon 有独立额度组时只读自己的组。
+运行细节（启动、凭据准备、握手、建会话、选模型、首块、首个工具及续轮耗时）写在 Host 日志中，设置页不再单独提供诊断面板。额度与 Credits 在设置页「账号」卡片中查看：每个账号的额度明细直接铺开（分组 + 窗口 + 百分比 + 余量条 + 重置时间 + AI Credits），挂载时自动读取。对话输入框旁的药丸只是纯展示：显示当前所选模型所属额度池（池名 + 最低窗口百分比 + 迷你条），不可点击。默认两个额度池：Gemini 与 Claude / GPT；Gemini 4 Argon 共用 Gemini 池。若上游返回非空独立 Argon 组，药丸仍按需单独读取展示，不并入 Gemini 池；未知型号不借用其它池的数字，显示「未知」。
 
 目录刷新可从一次暂时回收故障中恢复，但持续无法确认进程退出时仍会失败，不复用未确认退出的连接。会话配置缺少模型选择器时保留已知目录，不把一次不完整响应当成模型已下架。
 
@@ -57,7 +57,7 @@ ACP 连接在首次聊天时按需建立，不提供手动连接 / 预热入口�
 模型目录来自会话 `configOptions`、`config_option_update` 与官方 CLI 的只读 `agy models`。`initialize` 本身不是无需登录即可获取完整模型目录的接口。没有缓存时目录可以为空，应先显式连接或刷新。
 
 - 观测目录写入 `$DSH_HOME/cache/antigravity-acp/catalog.json`，只含模型信息，不含凭据；CLI 目录使用同目录的 `cli-models.json`。版本不符或损坏的缓存不作为有效目录。
-- 设置页的模型列表按 Gemini / Claude / GPT / Argon / 其它家族分组，只做显示 / 隐藏：点击模型标签切换，隐藏项不在选择器中列出。列表 = ACP 观测目录 ∪ 官方 CLI 清单，CLI 的档位化原始行（`…-high`）会先折叠成家族再合并，所以同一模型不会按思考档位分行。停用不删除目录条目；`modelOverrides` 里的显示名 / 官方 ID 映射仍按配置生效，但不再提供 UI 编辑。
+- 设置页的模型列表按 Gemini（含 Argon）/ Claude / GPT / 其它家族分组，只做显示 / 隐藏：点击模型标签切换，隐藏项不在选择器中列出。列表 = ACP 观测目录 ∪ 官方 CLI 清单，CLI 的档位化原始行（`…-high`）会先折叠成家族再合并，所以同一模型不会按思考档位分行。停用不删除目录条目；`modelOverrides` 里的显示名 / 官方 ID 映射仍按配置生效，但不再提供 UI 编辑。
 - 映射（`target`）优先于路由回调；没有映射时才按「显式选择 → `thought_level` 选项」决定最终配置值。
 - **思考强度是模型的元数据，不是模型 ID 的一部分**：官方 ACP 1.5 起把档位声明成独立的 `thought_level` 选择器（本机 `agy acp` 1.5.10 实测：`model` 只给家族 id，`thought_level` 给 Low / Medium / High，切到 Gemini 4 Hydrogen 后多一档 Extra/`xhigh`）。插件据此声明 `reasoning.efforts`（id 与名称都取 agent 声明），于是 DSH 的 `/model` 菜单与模型按钮上有档位可选；选模只发家族 id，档位另写一次 `session/set_config_option`，请求的档位不在当前选项里时按 low → medium → high → xhigh 就近收敛，不把未知值发出去。
 - 兼容旧 agent：没有 `thought_level` 时，官方档位化目录（`claude-opus-5-5-high`）折叠成家族并退回「档位后缀」路由，缺档取最近档位，未指定通常使用 `medium`。`gpt-oss-120b` 家族不列入选择器。
@@ -133,19 +133,15 @@ ACP fs / terminal 与未知原生权限请求始终拒绝并记录，但不因�
 
 ### 额度药丸与 AI Credits
 
-选中 `antigravity-acp` 时显示；药丸保留原尺寸，只显示一个额度入口。展开详情按模型组分隔，各时间窗口在可用宽度内并排显示百分比、细进度条与重置时间，Credits 采用紧凑布局。药丸位于模型选择器左侧，按已保存的官方映射匹配 Gemini、Claude/GPT、Gemini 4 Argon 额度组；未知型号与旧 `server-default` 不借用其它模型数字（显示名不影响分组）。
+选中 `antigravity-acp` 时，对话输入框旁显示额度药丸（位于模型选择器左侧）。药丸是纯展示、不可点击，也不再展开弹层：它只显示当前所选模型所属额度池名、该池的最低窗口百分比与迷你条，额度偏少、用尽、缓存或失败时增加简短状态；外观交互参考 [dsh-subusage](https://github.com/KouzakiUmi/dsh-subusage) 0.23.0（MIT）。默认两个额度池：Gemini 与 Claude / GPT；Gemini 4 Argon 共用 Gemini 池。上游若仍返回非空独立 Argon 组，则单独读取该组、不并入 Gemini 池；未知型号与旧 `server-default` 不借用其它池的数字，显示「未知」（显示名不影响分组）。本插件独立取数，不依赖 subusage 服务，也不读取其它订阅。
 
-展开固定展示三个组；缺数据标为未提供，显示每窗剩余百分比、重置时间、当前模型、缓存状态与刷新。未开启 CLI 积分查询时 AI Credits 区块整体隐藏，开启后的查询失败仍展示；支持深浅主题、Escape 与外部点击关闭。
-
-药丸外观交互参考 [dsh-subusage](https://github.com/KouzakiUmi/dsh-subusage) 0.23.0（MIT）：正常只显示当前模型窗口的迷你条，额度偏少、用尽、缓存或失败时增加简短状态，详情有关闭按钮。本插件独立取数，不依赖 subusage 服务，也不读取其它订阅。
-
-设置页每个账号卡片用与药丸同款的迷你条展示额度组与窗口百分比，重置时间与 Credits 收在「详情」里；账号卡片挂载时读取该账号，与药丸共享读取器但不广播其它账号的结果；切换 / 登录 / 删除账号后药丸重新读取当前账号，迟到结果不覆盖新账号。顶部保存栏随滚动可见，外观与其它面板一致，修改网络设置后先保存再连接。
+完整的额度分组与 AI Credits 在设置页「账号」卡片中直接铺开展示：每张卡片用与药丸同款的迷你条列出默认 Gemini、Claude / GPT 两个额度池（上游返回非空独立 Argon 组时额外展示），每组给出窗口名、剩余百分比、余量条与重置倒计时，末尾是该账号的 AI Credits；未开启 CLI 积分查询时 AI Credits 隐藏，开启后的查询失败仍展示。账号卡片挂载时自动读取该账号，与药丸共享读取器但不广播其它账号的结果；切换 / 登录 / 删除账号后药丸重新读取当前账号，迟到结果不覆盖新账号。顶部保存栏随滚动可见，外观与其它面板一致，修改网络设置后先保存再连接。
 
 翻转「用 agy CLI 查询额度」会让缓存身份变化并重取；额度缓存按账号隔离，在途旧结果不覆盖其它账号或切换后的当前账号。AI Credits 默认不查询；打开开关后才来自对应账号的官方 CLI 登录态。
 
 | 数据 | 优先来源 | 回退 / 限制 |
 |---|---|---|
-| 套餐额度（打开 CLI 取数） | 该账号 HOME 下 `agy -p /usage --output-format json` 的 `command.data.groups[].buckets[]` | 未找到 agy 时回落 HTTP（同样读该账号 HOME） |
+| 套餐额度（打开 CLI 取数） | 该账号 HOME 下 `agy -p /usage --output-format json` 的 `command.data.groups[].buckets[]` | `cliQuotaEnabled` 开启但未找到 `agy` 时明确报错，不回落 HTTP |
 | AI Credits | 仅当 `cliQuotaEnabled` 为真时：`agy -p /credits --output-format json` 的 `command.data.remaining_credits`，可选 `plan_name` | 默认不查询（`cli-disabled`，界面隐藏区块）；开关开启但 CLI 缺失等故障以 `cli-unavailable` 等错误码显示，不从套餐额度推算 |
 
 ACP 目录发现沿用排队、握手与会话请求各阶段的超时，不再额外套用普通请求或客户端 60 秒总期限。目录发现和能力准备优先复用已有空闲 worker，不因聊天粘性额外扩容。
@@ -154,7 +150,7 @@ CLI 额度 / 余额命令各有 45 秒超时，HTTP 回退的换发与 Cloud Cod
 
 HTTP 额度回退只读 CLI 登录材料，换发 access token 仅留内存，不写回 CLI 文件。所有 CLI 进程经宿主受管通道启动。日志与错误对 OAuth URL、Bearer、代理密码和结构化 token 脱敏，不回显正文或工具参数值。
 
-**历史实测，不是 0.1.24 GUI 验收：** 2026-10-16 本机 CLI `/usage` 返回三个组的 weekly / 5h 窗口；同账户 HTTP 回退曾返回产品授权 403。2026-10-22 既有 CLI `/credits` 记录为成功、零模型回合 / 零用量。当前任务未重跑这些在线调用；不能保证所有旧 CLI 支持相同 JSON 形态。
+**历史实测，不是 0.1.24 GUI 验收：** 2026-10-16 本机 CLI `/usage` 返回三个组的 weekly / 5h 窗口；同账户 HTTP 回退曾返回产品授权 403。2026-10-22 既有 CLI `/credits` 记录为成功、零模型回合 / 零用量。当前任务未重跑这些在线调用；不能保证所有旧 CLI 支持相同 JSON 形态。2026-11-24 复测（隔离账号，Google AI Pro，`agy` 1.5.15）：HTTP `retrieveUserQuotaSummary` 与 CLI `/usage --output-format json` 均只返回 `Gemini Models` 与 `Claude and GPT models` 两组（Argon 并入 Gemini 池），与 2026-10-16 的三组记录不同，属上游产品调整。
 
 官方参考：[安装与认证](https://antigravity.google/docs/cli/install.md)、[无头模式](https://antigravity.google/docs/cli/headless.md)、[AI Credits](https://antigravity.google/docs/cli/commands/credits.md)。本地 JSON 契约与官方 TUI 说明的覆盖范围不同。
 

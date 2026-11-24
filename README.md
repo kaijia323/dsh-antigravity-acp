@@ -17,7 +17,7 @@
 - **工具留在 DSH**：agent 的工具调用经私有 MCP 桥回到 DSH，由 DSH 校验、审批、执行
 - **模型选择器直连**：Gemini 4 Argon / Hydrogen、Claude Opus 5.5、Sonnet 5.5 等家族一行；思考强度由 agent 声明，在 DSH 的思考强度菜单里选后写入官方 `thought_level`
 - **多账号**：设置页里直接浏览器登录多个 Antigravity 账号，各自隔离 HOME；一键切换当前账号，额度按账号查看
-- **额度可见**：按额度组显示窗口、剩余百分比与重置时间
+- **额度可见**：账号卡片挂载即自动读取该账号额度，按额度池显示窗口、剩余百分比与重置时间；默认 Gemini 与 Claude / GPT 两个池，Gemini 4 Argon 与 Gemini 共用额度池
 
 ## 安装
 
@@ -35,7 +35,7 @@ dsh plugin --profile <profile> add dsh-bundle-antigravity-acp
 1. **登录**：设置页 →「账号」→「添加账号」，在浏览器里完成 Google 授权即可；也可以直接使用本机官方 CLI 的登录态（系统账号）。多账号之间互不覆盖，点「使用此账号」切换当前账号。
 2. **选模型**：对话里打开模型选择器，选 `Antigravity (ACP)` 下的模型家族。
 3. **调强度**：思考强度由官方 agent 声明（例如 Hydrogen 多一档 Extra），在 DSH 的思考强度菜单里选即可；插件把选择写入官方 `thought_level` 配置项，不再靠模型 ID 后缀。
-4. **看额度**：每个账号卡片里点「拉取额度」，或直接看输入框旁的额度药丸（跟随当前账号）。
+4. **看额度**：打开设置页「账号」，账号卡片挂载时自动读取该账号额度；对话输入框旁的额度药丸跟随当前账号。
 
 配置项、边界与排障见 [docs/reference.md](docs/reference.md) 与 [docs/configuration.md](docs/configuration.md)。
 
@@ -55,7 +55,7 @@ dsh plugin --profile <profile> add dsh-bundle-antigravity-acp
 ```bash
 npm ci
 npx tsc --noEmit     # 类型检查
-npx vitest run       # 47 个文件 / 846 项测试
+npx vitest run       # 隔离回归（文件与用例数随版本增长，以实际输出为准）
 ```
 
 ## 许可

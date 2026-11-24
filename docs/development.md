@@ -65,10 +65,12 @@ npm pack
 
 0.3.2-fork.7（kaijia323，2026-11-20）复检：`npm run check` 通过；真机（`agy acp` 1.5.13、隔离 HOME、生产同款启动参数）新增用例 `tests/real-tool-permission.test.ts` 通过——权限请求按 `mcp_<server>_<tool>` 识别 → `allow_once` → `tool-calls` → 回填 `pong:ping` → `stop`。故障复现证据：2026-11-20 20:26 DSH 会话 `1e99d2c5`（Gemini 4 Neon）首轮只产生思考块，ACP server 日志显示 `Monitor agy_tool_safety` 命中 `unsupported_tool: mcp_dsh-tools_run_code` 后 `Tool confirmation … approved=false` 并取消 cascade；旧解析器把该权限请求当成原生能力拒绝。
 
+0.3.2-fork.8（kaijia323，2026-11-24）变更记录：适配上游额度池调整——2026-11-24 隔离账号（Google AI Pro，`agy` 1.5.15）实测 HTTP `retrieveUserQuotaSummary` 与 CLI `/usage --output-format json` 均只返回 `Gemini Models` 与 `Claude and GPT models` 两组，`fetchAvailableModels` 交叉验证 `gemini-4-argon-{low,medium,high}` 的 `quotaInfo` 与其它 Gemini 模型逐字段一致（详见 claims #19）；离线回归覆盖默认两池与上游非空独立 Argon 组兼容两种形状；本轮检查结果与测试总数以 `npm run check` / `npm test` 实际输出为准。
+
 | 验证项 | 状态与范围 |
 |---|---|
 | TypeScript | `npm run typecheck` 通过 |
-| 隔离回归 | 38 个文件 / 688 项通过；本次使用系统 Node 26.13.0 运行同一 TypeScript / Vitest / 构建入口 |
+| 隔离回归 | 隔离用例覆盖类型、协议、桥、额度、多账号与客户端交互；文件与用例数随版本增长，以 `npm test` 实际输出为准（不在此虚报总数） |
 | 构建 | `npm run build` 通过 |
 | 工具 / runtime | 假 ACP / MCP、乱序工具结果、池所有权、续轮变更、取消、写入阻塞和回收 |
 | 图片 | 附件引用校验、图片内容映射与跨 worker 能力、附件缺席降级；未调用真实视觉模型 |
@@ -82,7 +84,7 @@ npm pack
 | 代理（出网） | 合成依赖、动态变更与清空、不打断旧响应、卸载释放、失败不直连、运行期地址变坏时按 Promise 拒绝、装载期非法地址不阻断插件、本地 SOCKS 测试；不是 Google 网络可达性保证 |
 | 代理环境继承 | HTTPS / ALL / HTTP 优先级、显式值覆盖及清空恢复、OAuth 与原生 TLS 接线、本地 CONNECT 首包和 NO_PROXY。无凭据 Google 探针对比直连超时与环境代理收到 401，只验证工具进程所见网络，不代表运行中 Host 的环境或账户可用性 |
 | 系统代理检测 | 环境变量优先级、Windows 注册表 `ProxyEnable` / `ProxyServer`、macOS `scutil --proxy`、Linux GNOME manual / none、非法地址忽略；`run` 全部注入假实现，不触真实系统设置 |
-| 额度取数 | 假 fetch 覆盖超时折叠、401/403 按状态码重试一次、401 后成功、非 401/403 不重试、OAuth 元数据配对；`cliQuotaEnabled` 默认关闭时即使注入 CLI 也不 spawn，打开后才走 `/usage` 与 `/credits`，关闭后旧快照失效；不触真实账户 |
+| 额度取数 | 假 fetch 覆盖超时折叠、401/403 按状态码重试一次、401 后成功、非 401/403 不重试、OAuth 元数据配对；默认两池（Gemini、Claude / GPT，Argon 并入 Gemini）与上游返回非空独立 Argon 组两种形状、未知型号不借用其它池；`cliQuotaEnabled` 默认关闭时即使注入 CLI 也不 spawn，打开后才走 `/usage` 与 `/credits`，关闭后旧快照失效，开启但 CLI 缺失时明确报错、不回落 HTTP；不触真实账户 |
 | 真实上游 / GUI | 本次 OAuth 使用真实本地 HTTP 与模拟 Google 响应，浏览器使用离线夹具；0.1.40 安装后的 GUI、真实 Google 授权、真实生成或图片识别尚未验收 |
 | 非 Windows | 有平台映射与契约测试，未实机验收 |
 | 生产依赖漏洞 | `check` 不包含漏洞审计；没有单独成功审计证据就不声明通过 |
@@ -154,7 +156,7 @@ node scripts/preview-ui.mjs
 
 ### 0.1.28 验证记录
 
-2026-10-25 的源码工作副本执行 `npm run check`：TypeScript 检查、**36 个文件 / 617 项测试**与构建通过。新增覆盖手动预热的有界回收恢复、空模型配置保留目录、worker 元数据与档位合并、实际 worker 图片能力准备、额度信封与独立缓存竞态、Argon 共享额度、客户端失败保留快照，以及设置页分组与草稿行为。
+2026-10-25 的源码工作副本执行 `npm run check`：TypeScript 检查、**36 个文件 / 617 项测试**与构建通过。新增覆盖手动预热的有界回收恢复、空模型配置保留目录、worker 元数据与档位合并、实际 worker 图片能力准备、额度信封与独立缓存竞态、Argon 共享额度（0.3.2-fork.8 起细化为默认两池与上游非空独立 Argon 组兼容两种形状）、客户端失败保留快照，以及设置页分组与草稿行为。该计数为当次运行记录，最新总数以 `npm test` 实际输出为准。
 
 同时使用本机 Chrome 无头截图检查 `.local-preview/quota-ui.html` 的浅色 / 深色及 750px 窄屏静态预览；预览数字全部为虚构，不访问真实账户或 DSH 页面。未执行发布、Profile 安装、Host 重启或真实 Desktop GUI / 官方账号验收。
 

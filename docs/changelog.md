@@ -4,6 +4,12 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.8 · 2026-11-24（kaijia323 fork）
+
+- **适配 Google 额度池调整：Gemini 4 Argon 并入 `Gemini Models`。** 2026-11-24 实测（隔离账号 acc_1795102134232_2190af30，Google AI Pro，`agy` 1.5.15）：HTTP `retrieveUserQuotaSummary` 与 CLI `agy -p /usage --output-format json` 均只返回两个额度组——`Gemini Models`（`weekly` / `5h`）与 `Claude and GPT models`（`weekly` / `5h`）；HTTP `fetchAvailableModels` 交叉验证 `gemini-4-argon-{low,medium,high}` 的 `quotaInfo`（remainingFraction / resetTime）与其它 Gemini 模型逐字段一致，没有独立 Argon bucket。2026-11-18 历史为三个组（见 claims #19）。
+- **默认额度池收敛为 Gemini 与 Claude / GPT 两个**：账号卡片不再出现空的「Gemini 4 Argon」区块或「未知」；药丸与账号卡片里 Argon 默认读取 Gemini 池。若上游仍返回非空独立 Argon 组，则按需保留显示并单独读取，不并入、不污染 Gemini 池；未知型号仍显示「未知」、不借用其它池。设置页模型列表把 Argon 归在 Gemini 组下。
+- 同步离线预览夹具（`scripts/preview-kit.mjs` 移除过时的独立 Argon 组，保留 `gemini-4-argon` 模型以展示共用 Gemini 池）与 `README`、`docs/claims.md`、`docs/reference.md`、`docs/configuration.md`、`docs/development.md`。
+
 ## 0.3.2-fork.7 · 2026-11-20（kaijia323 fork）
 
 - **修复：换用 1.5.13 `agy acp`（Go）后，任何 MCP 工具调用都会让整轮「运行失败」且用户只看到一句 `AGY_EMPTY_RESPONSE`。** 真机复现（2026-11-20 20:26，会话 `1e99d2c5`，Gemini 4 Neon）：

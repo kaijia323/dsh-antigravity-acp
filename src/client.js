@@ -136,7 +136,7 @@ window.__ModuleLoader__.load({
      * 单个账号的额度块：挂载时自动读取，失败保留旧快照并标缓存。
      * 用 `readQuota.readAccount`（存在时）避免把非当前账号的额度广播给药丸。
      */
-    function AccountQuota({ readQuota, source, account }) {
+    function AccountQuota({ readQuota, source, account, model }) {
       const [data, setData] = React.useState(null)
       const [refreshing, setRefreshing] = React.useState(false)
       const version = React.useRef(0)
@@ -175,7 +175,7 @@ window.__ModuleLoader__.load({
         data
           // 设置页直接铺胶囊面板的内容：分组 + 窗口百分比 + 余量条 + 重置倒计时 + Credits，
           // 不再折叠、也不再有一个可点开的弹层（对话页胶囊已是纯展示）。
-          ? QuotaDetails({ data, showHeader: false, showCredits: true })
+          ? QuotaDetails({ data, model, showHeader: false, showCredits: true })
           : h('p', { role: 'status', style: { margin: 0, fontSize: '12px' } }, refreshing ? '正在读取…' : '尚未查询'))
     }
 
@@ -202,7 +202,7 @@ window.__ModuleLoader__.load({
     }
 
     /** 一个账号的卡片：身份、启停/登录/删除、额度。 */
-    function AccountCard({ account, readQuota, source, disabled, onActivate, onRelogin, onRemove, confirmRemove, setConfirmRemove }) {
+    function AccountCard({ account, readQuota, source, model, disabled, onActivate, onRelogin, onRemove, confirmRemove, setConfirmRemove }) {
       const title = account.alias
       return h('article', { role: 'listitem', 'aria-label': '账号 ' + title, style: { padding: '11px 12px', borderRadius: '11px', border: '1px solid ' + (account.active ? 'rgba(23,124,85,.55)' : 'rgba(128,128,128,.16)'), background: account.active ? 'rgba(23,124,85,.05)' : 'rgba(128,128,128,.025)' } },
         h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: '10px' } },
@@ -222,7 +222,7 @@ window.__ModuleLoader__.load({
               style: { ...ACTION, minHeight: '28px', padding: '3px 9px', fontSize: '11px', ...(confirmRemove ? { color: '#b42318', borderColor: 'rgba(180,35,24,.45)' } : {}) },
               onClick: () => { if (confirmRemove) onRemove(account); else setConfirmRemove(account.id) },
             }, confirmRemove ? '确认删除' : '删除') : null)),
-        AccountQuota({ readQuota, source, account }))
+        AccountQuota({ readQuota, source, account, model }))
     }
 
     function AntigravitySettingsCard(props) {
@@ -525,6 +525,8 @@ window.__ModuleLoader__.load({
                   account: row,
                   readQuota: props.readQuota,
                   source: PROVIDER,
+                  // 宿主未提供当前模型时徽标不出现；提供时按模型家族标出「当前模型」。
+                  model: props.model,
                   disabled: authBusy,
                   onActivate: (target) => accountAction('activate', { id: target.id }),
                   onRelogin: (target) => accountAction('relogin', { id: target.id }),
@@ -556,7 +558,12 @@ window.__ModuleLoader__.load({
     const SUMMARY = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', cursor: 'pointer', listStyle: 'none' }
     const ACTION = { padding: '7px 12px', minHeight: '34px', borderRadius: '8px', border: '1px solid rgba(128,128,128,.22)', background: 'rgba(128,128,128,.06)', color: 'inherit', font: 'inherit', fontSize: '12px', cursor: 'pointer' }
     const PRIMARY = { ...ACTION, background: '#177c55', border: '1px solid #177c55', color: '#fff', fontWeight: 600 }
-    const GROUPS = [{ key: 'gemini', name: 'Gemini' }, { key: 'claude', name: 'Claude / GPT' }, { key: 'argon', name: 'Gemini 4 Argon' }]
+    // 2026-11-24 真机：Google 把 Gemini 4 Argon 并入 Gemini Models 额度池，HTTP / CLI 都只返回两池
+    // （证据与账号口径见 docs/claims.md 第 19 条）。
+    const GROUPS = [{ key: 'gemini', name: 'Gemini' }, { key: 'claude', name: 'Claude / GPT' }]
+    // 旧套餐或其它账号的上游仍可能返回独立的 Gemini 4 Argon 组：只在该组确有窗口时才追加，
+    // 且绝不把 Argon 的窗口并进 Gemini 池（同一组混两个来源会让百分比失去意义）。
+    const LEGACY_ARGON_GROUP = { key: 'argon', name: 'Gemini 4 Argon' }
     function groupKey(name) {
       const text = String(name ?? '').toLowerCase()
       if (/\bargon\b/.test(text)) return 'argon'
@@ -564,17 +571,31 @@ window.__ModuleLoader__.load({
       if (/\b(claude|gpt)\b/.test(text)) return 'claude'
       return undefined
     }
+    /** 模型 ID 是否指向 Gemini 4 Argon 家族（容忍 `antigravity-` 前缀与档位后缀）。 */
+    function isArgonModel(model) {
+      const id = String(model ?? '').toLowerCase().replace(/^antigravity-/, '')
+      return /^gemini-/.test(id) && /(?:^|-)argon(?:-|$)/.test(id)
+    }
+    /** Settings -> Models 的分组长：Argon 现在属于 Gemini 家族（额度也共享 Gemini 池）。 */
     function modelGroup(model) {
       const id = String(model ?? '').toLowerCase().replace(/^antigravity-/, '')
-      if (/^gemini-/.test(id) && /(?:^|-)argon(?:-|$)/.test(id)) return 'argon'
       if (/^gemini-/.test(id)) return 'gemini'
       if (/^(claude|gpt)-/.test(id)) return 'claude'
       return undefined
     }
     function quotaGroups(data) {
       const groups = Array.isArray(data?.groups) ? data.groups : []
-      return GROUPS.map((entry) => ({ ...entry, buckets: groups.filter((g) => groupKey(g.name) === entry.key).flatMap((g) => g.buckets ?? []) }))
-        .concat(groups.filter((g) => !groupKey(g.name)).map((g, i) => ({ ...g, key: 'other-' + i })))
+      const result = GROUPS.map((entry) => ({ ...entry, buckets: groups.filter((g) => groupKey(g.name) === entry.key).flatMap((g) => g.buckets ?? []) }))
+      // 仅当上游确实返回了带 buckets 的独立 Argon 组时才追加第三池；两池响应（含 data=null 的首载）
+      // 只渲染 Gemini 与 Claude / GPT，不出现空的「Gemini 4 Argon · 未提供额度数据」。
+      const argonBuckets = groups.filter((g) => groupKey(g.name) === 'argon').flatMap((g) => g.buckets ?? [])
+      if (argonBuckets.length > 0) result.push({ ...LEGACY_ARGON_GROUP, buckets: argonBuckets })
+      return result.concat(groups.filter((g) => !groupKey(g.name)).map((g, i) => ({ ...g, key: 'other-' + i })))
+    }
+    /** 当前模型的额度组：Argon 默认共享 Gemini 池，只有上游给了独立 Argon 组时才单独读取。 */
+    function resolveQuotaGroupKey(model, groups) {
+      if (isArgonModel(model) && groups.some((group) => group.key === 'argon' && (group.buckets?.length ?? 0) > 0)) return 'argon'
+      return modelGroup(model)
     }
     function percentage(bucket) {
       return Number.isFinite(bucket?.remainingPct) ? Math.max(0, Math.min(100, bucket.remainingPct)) : undefined
@@ -663,6 +684,8 @@ window.__ModuleLoader__.load({
         credits?.error?.message ? h('p', { role: credits.status === 'error' ? 'alert' : 'status', style: { margin: '4px 0 0', fontSize: '11px', overflowWrap: 'anywhere' } }, credits.error.message) : null)
     }
     function QuotaDetails({ data, model, onClose, showHeader = true, showCredits = true }) {
+      const groups = quotaGroups(data)
+      const activeGroupKey = resolveQuotaGroupKey(model, groups)
       return h('div', { style: { display: 'grid', gap: 0 } },
         showHeader ? h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center', paddingBottom: '9px', borderBottom: '1px solid rgba(128,128,128,.16)' } },
           h('strong', { style: { fontSize: '14px', flex: 1 } }, 'Antigravity · 套餐额度'),
@@ -670,10 +693,10 @@ window.__ModuleLoader__.load({
           onClose ? h('button', { type: 'button', 'aria-label': '关闭额度详情', onClick: onClose, style: { ...ACTION, padding: '2px 7px', minHeight: '26px', borderColor: 'transparent' } }, '×') : null) : null,
         data?.stale ? h('p', { role: 'status', style: { margin: '8px 0', padding: '6px 8px', borderRadius: '7px', background: 'rgba(217,155,40,.10)', color: '#d99b28', fontSize: '11px' } }, '缓存数据 · ' + (data.staleReason ?? '刷新失败')) : null,
         data?.status === 'error' ? h('p', { role: 'alert', style: { margin: '8px 0', color: '#ef4444', fontSize: '11px', overflowWrap: 'anywhere' } }, data.error?.message ?? data.error?.text ?? '额度读取失败') : null,
-        ...quotaGroups(data).map((group) => h('section', { key: group.key, style: { padding: '9px 0', borderBottom: '1px solid rgba(128,128,128,.14)' }, 'aria-label': group.name + '额度' },
+        ...groups.map((group) => h('section', { key: group.key, style: { padding: '9px 0', borderBottom: '1px solid rgba(128,128,128,.14)' }, 'aria-label': group.name + '额度' },
           h('div', { style: { display: 'flex', alignItems: 'center', gap: '7px', marginBottom: '7px' } },
             h('strong', { style: { fontSize: '12px' } }, group.name),
-            group.key === modelGroup(model) ? h('span', { style: { fontSize: '9px', padding: '1px 5px', borderRadius: '5px', color: '#25b879', background: 'rgba(37,184,121,.12)' } }, '当前模型') : null),
+            group.key === activeGroupKey ? h('span', { style: { fontSize: '9px', padding: '1px 5px', borderRadius: '5px', color: '#25b879', background: 'rgba(37,184,121,.12)' } }, '当前模型') : null),
           group.buckets.length ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: '9px 12px' } }, ...group.buckets.map((bucket, index) => {
             const pct = percentage(bucket)
             return h('div', { key: index, style: { minWidth: 0 } },
@@ -705,8 +728,10 @@ window.__ModuleLoader__.load({
       const quota = useQuota(readQuota, isAcp, state?.current?.provider, model)
       if (!isAcp) return null
       const groups = quotaGroups(quota.data)
-      // 只显示**当前所选模型所属家族**的额度；Argon 有独立额度组，不借用 Gemini 组。
-      const family = modelGroup(quota.data?.routeModel ?? model)
+      // 只显示**当前所选模型所属家族**的额度。2026-11-24 起 Google 把 Gemini 4 Argon 并入
+      // Gemini Models 池：Argon 默认共享 Gemini 组；仅当上游仍返回独立的、带窗口的 Argon 组时
+      // 才单独读它，绝不把两池互相借用。
+      const family = resolveQuotaGroupKey(quota.data?.routeModel ?? model, groups)
       const group = family === undefined ? undefined : groups.find((entry) => entry.key === family)
       const buckets = group?.buckets ?? []
       const usable = buckets.filter((bucket) => !bucket.disabled && percentage(bucket) !== undefined)
@@ -714,7 +739,7 @@ window.__ModuleLoader__.load({
       const worst = usable.length ? Math.min(...usable.map(percentage)) : undefined
       const stale = quota.data?.stale === true
       const failed = quota.data?.status === 'error'
-      const familyName = (GROUPS.find((entry) => entry.key === family) ?? {}).name ?? '额度'
+      const familyName = group?.name ?? (GROUPS.find((entry) => entry.key === family) ?? {}).name ?? '额度'
       const status = quotaPillStatus(quota.data, buckets)
       const value = failed ? '读取失败'
         : !quota.data ? '读取中'

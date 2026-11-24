@@ -100,8 +100,8 @@ export interface AntigravityHostConfig {
    * 是否允许额度取数调用本机官方 agy CLI（默认关闭）。
    * 关闭时不 spawn agy：套餐额度走 Cloud Code Assist HTTP（读该账号 HOME 下
    * 的 CLI 登录态），AI Credits 不查询。
-   * 开启后运行 `agy -p /usage` 与 `agy -p /credits`；未找到 CLI 时套餐额度
-   * 回落 HTTP，AI Credits 报 `cli-unavailable`。
+   * 开启后运行 `agy -p /usage` 与 `agy -p /credits`；未找到 CLI 时明确报错，
+   * 不回落 HTTP（整条额度读取随之失败，AI Credits 也不可用）。
    */
   cliQuotaEnabled?: boolean
 }
@@ -181,5 +181,5 @@ export const Config = Schema.object({
   defaultContextWindow: Schema.natural().min(0).max(10_000_000).default(1_048_576).volatile().description('目录未报告容量时的兜底上下文窗口（tokens，0=不填）；Claude 家族封顶 200k。用于避免切换模型时 MODEL_SWITCH_COMPACTION_FAILED'),
   cancelGraceMs: Schema.natural().max(60_000).default(30_000).volatile().description('取消后等待 agent 确认停止的上限（毫秒）；0 表示不等待、立即回收'),
   idleRecycleMs: Schema.natural().max(3_600_000).default(900_000).volatile().description('空闲 worker 保留多久（毫秒）；默认 15 分钟后回收进程，下次进入该对话用 session/resume 接回（已验证不重放历史）。0 表示不回收'),
-  cliQuotaEnabled: Schema.boolean().default(false).volatile().description('允许额度取数调用本机 agy CLI（默认关闭）。关闭时不启动 agy，套餐额度走内置直连，AI Credits 不查询。开启后运行 agy -p /usage 与 agy -p /credits；未找到 CLI 时套餐额度回落直连'),
+  cliQuotaEnabled: Schema.boolean().default(false).volatile().description('允许额度取数调用本机 agy CLI（默认关闭）。关闭时不启动 agy，套餐额度走 Cloud Code Assist HTTP（读该账号 HOME 下的 CLI 登录态），AI Credits 不查询。开启后运行 agy -p /usage 与 agy -p /credits；未找到 CLI 时明确报错，不回落 HTTP'),
 })
