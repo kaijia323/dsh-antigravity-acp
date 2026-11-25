@@ -154,7 +154,6 @@ export class McpToolBridge {
   #bound = false
   #closed = false
   #address: string | undefined
-  #callSeq = 0
   /** HTTP 监听器的最近一次运行期错误（诊断用；listen 阶段的错误走 spawn 的 reject）。 */
   #httpError: Error | undefined
 
@@ -486,7 +485,11 @@ export class McpToolBridge {
         isError: true,
       })
     }
-    const callId = `${BRIDGE_MCP_SERVER_NAME}-${++this.#callSeq}`
+    // callId 用随机 UUID 而非每桥自增序号：DSH PTC 的 subCallId 是
+    // `${callId}:ptc:<n>`，跨 worker 调度或桥重建（重启/热重载/resume）后自增
+    // 计数会回退或归零，同一会话日志里就会出现重复 subCallId，下次加载被
+    // SessionFormatError 拒载。UUID 保证全会话级唯一（且不含 ':'，拼接安全）。
+    const callId = `${BRIDGE_MCP_SERVER_NAME}-${randomUUID()}`
     const call: BridgeParkedCall = { callId, name, arguments: JSON.stringify(args ?? {}) }
     return new Promise<CallToolResult>((resolve) => {
       this.#pending.set(callId, { call, settle: resolve })

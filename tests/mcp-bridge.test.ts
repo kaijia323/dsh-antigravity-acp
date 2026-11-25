@@ -80,6 +80,27 @@ function textOf(result: unknown): string | undefined {
   return content?.[0]?.text
 }
 
+/**
+ * 在一条独立 in-memory 通道上连续派发 count 次 tools/call，回喂后返回桥实际
+ * 生成的 callId（= DSH tool-call id，PTC 会拼成 `${callId}:ptc:<n>`）。
+ */
+async function dispatchCallIds(bridge: McpToolBridge, count: number, tag: string): Promise<string[]> {
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+  await bridge.attach(serverSide)
+  const client = new Client({ name: `callid-${tag}`, version: '0.0.0' })
+  clients.push(client)
+  await client.connect(clientSide)
+  const calls = Array.from({ length: count }, (_, index) =>
+    client.callTool({ name: 'read_file', arguments: { path: `${tag}-${index}.txt` } }))
+  const settled = calls.map((call) => call.catch(() => undefined))
+  await vi.waitFor(() => expect(bridge.pendingCallIds()).toHaveLength(count))
+  const callIds = bridge.pendingCallIds()
+  await bridge.deliverResults(callIds.map((callId) => ({ callId, text: 'ok', isError: false })))
+  await Promise.all(settled)
+  expect(bridge.pendingCallIds()).toEqual([])
+  return callIds
+}
+
 describe('MCP 桥多会话隔离', () => {
   it('未知或已撤销的工具调用立即拒绝，不产生 park', async () => {
     const bridge = makeBridge()
@@ -300,5 +321,40 @@ describe('MCP 桥多会话隔离', () => {
     expect(matchesBridgeToken(token, token)).toBe(false)
     // 不能因为前缀相同就放行（旧实现用严格相等，这里防止回归到 startsWith 之类）。
     expect(matchesBridgeToken(`Bearer ${token}x`, token)).toBe(false)
+  })
+})
+
+describe('MCP 桥 callId 唯一性（PTC subCallId 撞号回归）', () => {
+  it('两个独立桥实例生成的 callId 集合完全无交集，可直接拼 PTC subCallId', async () => {
+    // 旧实现是每桥自增（dsh-tools-1、dsh-tools-2…）：跨 worker 调度或桥重建
+    // （重启/热重载/resume）后第二个桥会从 dsh-tools-1 重新开始，与第一个桥
+    // 撞号，同一会话日志里的 `${callId}:ptc:<n>` 重复，下次加载被拒。
+    const first = makeBridge()
+    const second = makeBridge()
+    const firstIds = await dispatchCallIds(first, 3, 'before-restart')
+    const secondIds = await dispatchCallIds(second, 3, 'after-restart')
+
+    expect(firstIds).toHaveLength(3)
+    expect(secondIds).toHaveLength(3)
+    expect(firstIds.filter((id) => secondIds.includes(id))).toEqual([])
+    expect(new Set([...firstIds, ...secondIds]).size).toBe(6)
+
+    for (const callId of [...firstIds, ...secondIds]) {
+      // 前缀保持服务名，冒号留给 PTC 的 `:ptc:<n>` 分隔符，不能出现在 callId 里。
+      expect(callId.startsWith(`${BRIDGE_MCP_SERVER_NAME}-`)).toBe(true)
+      expect(callId.startsWith('dsh-tools-')).toBe(true)
+      expect(callId).not.toContain(':')
+    }
+    // 真实不变式：两桥的 PTC 子调用 id 同样全局唯一。
+    const subCallIds = [...firstIds, ...secondIds].map((callId) => `${callId}:ptc:1`)
+    expect(new Set(subCallIds).size).toBe(6)
+  })
+
+  it('同一桥实例连续多次调用的 callId 互不相同', async () => {
+    const bridge = makeBridge()
+    const callIds = await dispatchCallIds(bridge, 5, 'same-bridge')
+    expect(callIds).toHaveLength(5)
+    expect(new Set(callIds).size).toBe(5)
+    for (const callId of callIds) expect(callId).not.toContain(':')
   })
 })
