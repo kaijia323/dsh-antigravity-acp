@@ -4,6 +4,12 @@
 
 记录源码与发布内容，不将本地构建、npm 发布和本机升级混为同一状态。日期采用 Asia/Hong_Kong。更早历史见 [Git 提交记录](https://github.com/KouzakiUmi/dsh-antigravity-acp/commits/main/)。
 
+## 0.3.2-fork.9 · 2026-11-25（kaijia323 fork）
+
+- **修复：MCP 桥的 tool callId 由每桥自增 `dsh-tools-<n>` 改为 `dsh-tools-<randomUUID>`。** DSH PTC 把子调用 id 拼成 `${callId}:ptc:<n>`；桥重建（宿主重启 / 热重载 / `session/resume` / 跨 worker 调度）后自增计数会归零，同一会话日志里出现重复 `subCallId`，下次加载被 `SessionFormatError` 拒载。随机 UUID 保证全会话级唯一，且不含 `:`（不干扰 PTC 分隔符），`src/bridge/mcp-bridge.ts` 同时移除 `#callSeq`。
+- 新增回归 `tests/mcp-bridge.test.ts`：两个独立桥实例各派发 3 个子调用（模拟桥重建前后），6 个 callId 互不相交、均可安全拼出唯一的 PTC `subCallId`；同一桥实例连续 5 次调用 callId 互不相同。
+- 验证：`npm run check` 全绿（typecheck + 439 passed / 18 skipped 真机套件 + build）；2026-11-26 本机 DSH 0.2.3-alpha.2 真机 GUI 会话 `session-ad54434d`（Gemini 4 Hydrogen / High）：PTC `run_code → read` 子调用成功回传 `package.json` 内容并回答 `0.3.2-fork.9`，同时覆盖 fork.7 权限形状链路；真机 `AGY_REAL_ACP=1` 套件本轮未执行。
+
 ## 0.3.2-fork.8 · 2026-11-24（kaijia323 fork）
 
 - **适配 Google 额度池调整：Gemini 4 Argon 并入 `Gemini Models`。** 2026-11-24 实测（隔离账号 acc_1795102134232_2190af30，Google AI Pro，`agy` 1.5.15）：HTTP `retrieveUserQuotaSummary` 与 CLI `agy -p /usage --output-format json` 均只返回两个额度组——`Gemini Models`（`weekly` / `5h`）与 `Claude and GPT models`（`weekly` / `5h`）；HTTP `fetchAvailableModels` 交叉验证 `gemini-4-argon-{low,medium,high}` 的 `quotaInfo`（remainingFraction / resetTime）与其它 Gemini 模型逐字段一致，没有独立 Argon bucket。2026-11-18 历史为三个组（见 claims #19）。
